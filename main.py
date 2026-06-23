@@ -96,7 +96,7 @@ If there's a call recording (direct audio URL), transcribe it and extract key de
 and call update_spotio_notes with lead_id={lead_id}.
 """
 
-print(f"DEBUG: raw payload: {payload}")
+    print(f"DEBUG: raw payload: {payload}")
     print(f"DEBUG: prompt sent to Claude: {prompt}")
 
     messages = [{"role": "user", "content": prompt}]
@@ -127,6 +127,10 @@ print(f"DEBUG: raw payload: {payload}")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=2048, tools=tools, messages=messages
         )
+        print(f"DEBUG: Claude stop_reason: {response.stop_reason}")
+        for block in response.content:
+            if block.type == "text":
+                print(f"DEBUG: Claude said: {block.text}")
 
     return {"status": "done"}
 
