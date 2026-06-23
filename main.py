@@ -45,7 +45,7 @@ def update_spotio_notes(lead_id, notes):
 
 tools = [
     {"type": "web_search_20250305", "name": "web_search"},
-    {"type": "web_fetch_20250305", "name": "web_fetch"},
+    {"type": "web_fetch_20250910", "name": "web_fetch"},
     {
         "name": "transcribe_audio",
         "description": "Transcribe a call recording from a direct audio URL (mp3/wav)",
