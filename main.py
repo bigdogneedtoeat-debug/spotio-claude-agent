@@ -35,11 +35,20 @@ def transcribe_audio(url):
 
 def update_spotio_notes(lead_id, notes):
     token = get_spotio_token()
-    print(f"DEBUG: updating lead {lead_id} with notes: {notes[:200]}")
+
+    # Fetch current lead data first so we don't wipe out required fields like stageId
+    get_response = requests.get(
+        f"https://api.spotio2.com/api/leads/{lead_id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    current = get_response.json() if get_response.status_code == 200 else {}
+    stage_id = current.get("stageId", 1)
+
+    print(f"DEBUG: updating lead {lead_id} (stageId={stage_id}) with notes: {notes[:200]}")
     response = requests.put(
         f"https://api.spotio2.com/api/leads/{lead_id}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"notes": notes}
+        json={"notes": notes, "stageId": stage_id}
     )
     print(f"DEBUG: Spotio response status {response.status_code}, body: {response.text[:300]}")
     return f"Status: {response.status_code}"
