@@ -35,11 +35,13 @@ def transcribe_audio(url):
 
 def update_spotio_notes(lead_id, notes):
     token = get_spotio_token()
+    print(f"DEBUG: updating lead {lead_id} with notes: {notes[:200]}")
     response = requests.put(
         f"https://api.spotio2.com/api/leads/{lead_id}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json={"notes": notes}
     )
+    print(f"DEBUG: Spotio response status {response.status_code}, body: {response.text[:300]}")
     return f"Status: {response.status_code}"
 
 
@@ -101,6 +103,7 @@ and call update_spotio_notes with lead_id={lead_id}.
 
     while response.stop_reason == "tool_use":
         tool_use = next(b for b in response.content if b.type == "tool_use")
+        print(f"DEBUG: Claude called tool: {tool_use.name} with input: {tool_use.input}")
 
         if tool_use.name == "transcribe_audio":
             result = transcribe_audio(tool_use.input["url"])
