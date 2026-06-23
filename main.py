@@ -75,14 +75,18 @@ tools = [
 @app.post("/webhook")
 async def handle_lead(request: Request):
     payload = await request.json()
-    lead = payload.get("lead", {})
+    events = payload.get("payload", [])
+    data = events[0].get("data", {}) if events else {}
+    data_object = data.get("dataObject", {})
 
-    contacts = lead.get("contacts", [{}])
-    first_name = contacts[0].get("firstName", "") if contacts else ""
-    last_name = contacts[0].get("lastName", "") if contacts else ""
-    address = lead.get("address", {}).get("fullAddress", "")
-    notes = lead.get("notes", "")
-    lead_id = lead.get("id", "")
+    fields = data_object.get("fields", [])
+    field_map = {f.get("title", ""): (f.get("values") or [""])[0] for f in fields}
+    first_name = field_map.get("First Name", "")
+    last_name = field_map.get("Last Name", "")
+
+    address = data_object.get("address", {}).get("fullAddress", "")
+    notes = data.get("notes", "")
+    lead_id = data_object.get("objectId", "")
 
     prompt = f"""New Spotio lead created:
 Name: {first_name} {last_name}
