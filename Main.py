@@ -7,7 +7,17 @@ app = FastAPI()
 client = anthropic.Anthropic()
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
-SPOTIO_TOKEN = os.environ.get("SPOTIO_TOKEN")
+SPOTIO_CLIENT_ID = os.environ.get("SPOTIO_CLIENT_ID")
+SPOTIO_CLIENT_SECRET = os.environ.get("SPOTIO_CLIENT_SECRET")
+
+
+def get_spotio_token():
+    response = requests.post(
+        "https://api.spotio2.com/api/users/apitoken",
+        headers={"Accept": "text/plain", "Content-Type": "application/merge-patch+json"},
+        json={"clientId": SPOTIO_CLIENT_ID, "secret": SPOTIO_CLIENT_SECRET}
+    )
+    return response.json()["accessToken"]
 
 
 def transcribe_audio(url):
@@ -24,9 +34,10 @@ def transcribe_audio(url):
 
 
 def update_spotio_notes(lead_id, notes):
+    token = get_spotio_token()
     response = requests.put(
-        f"https://api.spotio.com/v2/leads/{lead_id}",
-        headers={"Authorization": f"Bearer {SPOTIO_TOKEN}"},
+        f"https://api.spotio2.com/api/leads/{lead_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json={"notes": notes}
     )
     return f"Status: {response.status_code}"
