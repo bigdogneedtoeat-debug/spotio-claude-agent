@@ -41,32 +41,20 @@ def transcribe_audio(url):
 
 def update_activity_notes(activity_id, notes):
     token = get_spotio_token()
-    headers = {"Authorization": f"Bearer {token}"}
 
-    get_resp = requests.get(f"{SPOTIO_BASE}/api/v2/activities/{activity_id}", headers=headers)
-    print(f"DEBUG: GET activity {activity_id}: {get_resp.status_code} {get_resp.text[:1000]}")
-    if get_resp.status_code != 200:
-        return f"Failed to fetch activity first: {get_resp.status_code} {get_resp.text[:300]}"
-
-    activity = get_resp.json()
-
-    # Set the new notes, preserving every other field/type exactly as Spotio returned it
-    activity["notes"] = notes
-
-    # Fields known to cause conflicts on PUT (computed/read-only or trigger dataObject edit checks)
-    for field in ["dataObjectId", "dataObjectLat", "dataObjectLng", "activityLat", "activityLng",
-                  "transition", "isNote", "autoExecution", "id"]:
-        activity.pop(field, None)
-
-    put_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    put_resp = requests.put(
+    patch_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/merge-patch+json",
+        "Accept": "text/plain"
+    }
+    patch_resp = requests.patch(
         f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
-        headers=put_headers,
-        json=activity
+        headers=patch_headers,
+        json={"notes": notes}
     )
-    print(f"DEBUG: PUT activity {activity_id}: {put_resp.status_code} {put_resp.text[:1000]}")
+    print(f"DEBUG: PATCH activity {activity_id}: {patch_resp.status_code} {patch_resp.text[:1000]}")
 
-    return f"Status: {put_resp.status_code}\nBody: {put_resp.text[:1000]}"
+    return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
 
 
 def spotio_api_call(method, path, body=None):
