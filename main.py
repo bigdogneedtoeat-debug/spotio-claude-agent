@@ -130,6 +130,16 @@ def update_activity_notes(activity_id, notes):
     return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
 
 
+MAX_TOOL_RESULT_CHARS = 6000
+
+
+def truncate_result(text, limit=MAX_TOOL_RESULT_CHARS):
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...[truncated, {len(text) - limit} more characters omitted]"
+
+
 def spotio_api_call(method, path, body=None):
     """Generic Spotio API caller. path should start with /api/..."""
     token = get_spotio_token()
@@ -368,26 +378,36 @@ Your job:
 
             if tool_use.name == "transcribe_audio":
                 result = transcribe_audio(tool_use.input["url"])
+                result_limit = None  # never truncate call transcripts, however long
             elif tool_use.name == "ask_grok":
                 result = ask_grok(tool_use.input["question"])
+                result_limit = 3000
             elif tool_use.name == "update_spotio_field":
                 result = update_spotio_field(
                     tool_use.input["record_type"],
                     tool_use.input["record_id"],
                     tool_use.input["fields"]
                 )
+                result_limit = 1000
             elif tool_use.name == "update_activity_notes":
                 result = update_activity_notes(tool_use.input["activity_id"], tool_use.input["notes"])
+                result_limit = 1000
             elif tool_use.name == "spotio_api_call":
                 result = spotio_api_call(
                     tool_use.input["method"],
                     tool_use.input["path"],
                     tool_use.input.get("body")
                 )
+                result_limit = 1500
             else:
                 result = "handled automatically"
+                result_limit = MAX_TOOL_RESULT_CHARS
 
-            tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)})
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": str(result) if result_limit is None else truncate_result(result, result_limit)
+            })
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
