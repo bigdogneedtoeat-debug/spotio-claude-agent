@@ -39,6 +39,28 @@ def transcribe_audio(url):
         return f"Transcription failed: {data}"
 
 
+XAI_API_KEY = os.environ.get("XAI_API_KEY")
+
+
+def ask_grok(question):
+    response = requests.post(
+        "https://api.x.ai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {XAI_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "grok-4",
+            "messages": [{"role": "user", "content": question}]
+        }
+    )
+    print(f"DEBUG: Grok response status {response.status_code}, body: {response.text[:500]}")
+    try:
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return f"Grok call failed: {response.status_code} {response.text[:300]}"
+
+
 def update_activity_notes(activity_id, notes):
     token = get_spotio_token()
 
@@ -80,6 +102,18 @@ tools = [
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"]
+        }
+    },
+    {
+        "name": "ask_grok",
+        "description": (
+            "Ask Grok (xAI's LLM) a question and get its answer back as text. "
+            "Useful for a second opinion, alternate perspective, or anything you want Grok's take on."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"]
         }
     },
     {
@@ -182,6 +216,8 @@ Your job:
 
         if tool_use.name == "transcribe_audio":
             result = transcribe_audio(tool_use.input["url"])
+        elif tool_use.name == "ask_grok":
+            result = ask_grok(tool_use.input["question"])
         elif tool_use.name == "update_activity_notes":
             result = update_activity_notes(tool_use.input["activity_id"], tool_use.input["notes"])
         elif tool_use.name == "spotio_api_call":
