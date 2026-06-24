@@ -61,6 +61,30 @@ def ask_grok(question):
         return f"Grok call failed: {response.status_code} {response.text[:300]}"
 
 
+def update_spotio_field(record_type, record_id, fields):
+    """
+    record_type: 'activity' or 'lead'
+    fields: dict of field(s) to merge-patch in, e.g. {"date": "2026-06-25T14:00:00+00:00"}
+            or {"address": {"fullAddress": "...", "street": "...", ...}}
+    """
+    token = get_spotio_token()
+    path_segment = "activities" if record_type == "activity" else "leads"
+
+    patch_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/merge-patch+json",
+        "Accept": "text/plain"
+    }
+    patch_resp = requests.patch(
+        f"{SPOTIO_BASE}/api/v2/{path_segment}/{record_id}",
+        headers=patch_headers,
+        json=fields
+    )
+    print(f"DEBUG: PATCH {record_type} {record_id} with {fields}: {patch_resp.status_code} {patch_resp.text[:1000]}")
+
+    return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
+
+
 def update_activity_notes(activity_id, notes):
     token = get_spotio_token()
 
@@ -117,6 +141,26 @@ tools = [
         }
     },
     {
+        "name": "update_spotio_field",
+        "description": (
+            "Correct a field on a Spotio activity (e.g. the appointment 'date') or a lead "
+            "(e.g. 'address'). Only use this when you've found a CLEAR, obvious mistake — "
+            "e.g. the call recording states a different appointment time or address than "
+            "what's in Spotio. record_type must be 'activity' or 'lead'. fields is an object "
+            "with just the field(s) you're correcting, e.g. {\"date\": \"2026-06-25T14:00:00+00:00\"} "
+            "for an activity, or {\"address\": {\"fullAddress\": \"123 Main St, City, ST 00000\"}} for a lead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "record_type": {"type": "string"},
+                "record_id": {"type": "string"},
+                "fields": {"type": "object"}
+            },
+            "required": ["record_type", "record_id", "fields"]
+        }
+    },
+    {
         "name": "update_activity_notes",
         "description": (
             "Update the notes field on a Spotio activity. This automatically fetches the "
@@ -169,6 +213,7 @@ async def handle_lead(request: Request):
     notes = data.get("notes", "")
     activity_id = data.get("id", "") or data.get("objectId", "")
     lead_id = data_object.get("objectId", "")
+    appointment_date = data.get("date", "")
 
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
         print(f"DEBUG: SKIPPING — activity_id={activity_id}, lead_id={lead_id} not in test allowlist {ALLOWED_TEST_IDS}")
@@ -177,23 +222,68 @@ async def handle_lead(request: Request):
     prompt = f"""A Spotio activity was created/updated:
 
 Customer Name: {first_name} {last_name}
-Address: {address}
+Address on file: {address}
+Appointment date/time on file: {appointment_date}
 Activity notes (may contain a link): {notes}
 Activity ID: {activity_id}
 Related Lead ID: {lead_id}
 
 Your job:
-1. Research the address and customer online (web_search).
-2. If the activity notes contain a link, fetch it (web_fetch). If it points to an audio file
+
+1. TRANSCRIBE THE CALL
+   If the activity notes contain a link, fetch it (web_fetch). If it points to an audio file
    (e.g. a Google Drive share link), figure out the direct download URL and use transcribe_audio
    to get the call transcript.
-3. Extract key details from the call: pain points, objections, next steps, sentiment.
-4. Write a clean, structured summary.
-5. Update the ACTIVITY's notes field (NOT the lead) with this summary, using
+
+2. CHECK FOR MISTAKES
+   Compare what's said in the call transcript against the address and appointment date/time
+   on file above.
+   - If the call clearly states a DIFFERENT address than what's on file, and it's an obvious,
+     unambiguous mistake (not just you guessing), correct it using update_spotio_field with
+     record_type="lead", record_id={lead_id}, fields={{"address": {{"fullAddress": "..."}}}}.
+   - If the call clearly states a DIFFERENT appointment date/time than what's on file, and it's
+     an obvious, unambiguous mistake, correct it using update_spotio_field with
+     record_type="activity", record_id={activity_id}, fields={{"date": "..."}} (use ISO 8601
+     format matching the original, e.g. 2026-06-25T14:00:00+00:00).
+   - Only make a correction if you're confident it's a real mistake, not a guess. If you make
+     any correction, note exactly what was changed (old value -> new value) so it can be
+     included in the notes.
+
+3. EXTRACT THESE SPECIFIC DETAILS FROM THE CALL (answer briefly, simply):
+   - Was solar mentioned? If so, how many times?
+   - Is the customer expecting someone to come in person?
+   - Does the customer plan to be home?
+   - Are they expecting a call beforehand?
+   - What does the customer think their average electric bill is?
+
+4. RESEARCH THE CUSTOMER'S EMPLOYER
+   Use web_search to try to match this customer's name (and location, to disambiguate) to a
+   Facebook or LinkedIn profile, to determine who they work for / what company. Note what you
+   find (or that nothing reliable was found).
+
+5. RESEARCH THE HOME SALE HISTORY
+   Use web_search to find out when this home was last sold and for how much (e.g. via Zillow,
+   Redfin, or county property records). Note what you find (or that nothing reliable was found).
+
+6. ASK GROK FOR THE CUSTOMER'S AGE
+   Use ask_grok, giving it the customer's name and location, and ask it to estimate/provide the
+   customer's current age. Include whatever it answers in the notes (clearly labeled as Grok's
+   answer, and treat it as an unverified estimate).
+
+7. WRITE A CLEAN, STRUCTURED SUMMARY containing:
+   - Any corrections made (old value -> new value), if any
+   - The 5 quick call details from step 3
+   - The employer research from step 4
+   - The home sale history from step 5
+   - The age estimate from Grok (step 6)
+   Keep it concise and easy to scan — short bullet points, not long paragraphs.
+
+8. Update the ACTIVITY's notes field (NOT the lead) with this summary, using
    update_activity_notes with activity_id={activity_id}. This tool handles fetching the
    current activity and preserving its other fields for you — just pass the activity_id
    and your notes text.
-6. Confirm the update succeeded by checking the response status code is 200.
+
+9. Confirm the update succeeded by checking the response status code is 200.
 """
 
     print(f"DEBUG: raw payload: {payload}")
@@ -218,6 +308,12 @@ Your job:
             result = transcribe_audio(tool_use.input["url"])
         elif tool_use.name == "ask_grok":
             result = ask_grok(tool_use.input["question"])
+        elif tool_use.name == "update_spotio_field":
+            result = update_spotio_field(
+                tool_use.input["record_type"],
+                tool_use.input["record_id"],
+                tool_use.input["fields"]
+            )
         elif tool_use.name == "update_activity_notes":
             result = update_activity_notes(tool_use.input["activity_id"], tool_use.input["notes"])
         elif tool_use.name == "spotio_api_call":
