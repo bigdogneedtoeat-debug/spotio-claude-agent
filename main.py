@@ -17,13 +17,26 @@ SPOTIO_BASE = "https://api.spotio2.com"
 ALLOWED_TEST_IDS = [x.strip() for x in os.environ.get("ALLOWED_TEST_IDS", "").split(",") if x.strip()]
 
 
+import time
+
+_spotio_token_cache = {"token": None, "fetched_at": 0}
+SPOTIO_TOKEN_TTL_SECONDS = 45 * 60  # refresh every 45 min to be safe
+
+
 def get_spotio_token():
+    now = time.time()
+    if _spotio_token_cache["token"] and (now - _spotio_token_cache["fetched_at"] < SPOTIO_TOKEN_TTL_SECONDS):
+        return _spotio_token_cache["token"]
+
     response = requests.post(
         f"{SPOTIO_BASE}/api/users/apitoken",
         headers={"Accept": "text/plain", "Content-Type": "application/merge-patch+json"},
         json={"clientId": SPOTIO_CLIENT_ID, "secret": SPOTIO_CLIENT_SECRET}
     )
-    return response.json()["accessToken"]
+    token = response.json()["accessToken"]
+    _spotio_token_cache["token"] = token
+    _spotio_token_cache["fetched_at"] = now
+    return token
 
 
 def transcribe_audio(url):
@@ -229,10 +242,15 @@ async def process_lead(request: Request):
     activity_id = data.get("id", "") or data.get("objectId", "")
     lead_id = data_object.get("objectId", "")
     appointment_date = data.get("date", "")
+    source = field_map.get("Source", "")
 
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
         print(f"DEBUG: SKIPPING — activity_id={activity_id}, lead_id={lead_id} not in test allowlist {ALLOWED_TEST_IDS}")
         return {"status": "skipped (not in test allowlist)"}
+
+    if source.strip().lower() != "growthify":
+        print(f"DEBUG: SKIPPING — lead source is '{source}', not Growthify. activity_id={activity_id}")
+        return {"status": f"skipped (source is '{source}', not Growthify)"}
 
     prompt = f"""A Spotio activity was created/updated:
 
@@ -261,8 +279,10 @@ Your job:
      record_type="activity", record_id={activity_id}, fields={{"date": "..."}} (use ISO 8601
      format matching the original, e.g. 2026-06-25T14:00:00+00:00).
    - Only make a correction if you're confident it's a real mistake, not a guess. If you make
-     any correction, note exactly what was changed (old value -> new value) so it can be
-     included in the notes.
+     any correction, note exactly what was changed in the notes. Write both the old and new
+     date/time in plain, human-readable format (e.g. "June 25th at 11:00 AM"), not ISO 8601 —
+     the ISO format is only for the actual update_spotio_field call, never for what appears
+     in the notes.
 
 3. EXTRACT THESE SPECIFIC DETAILS FROM THE CALL (answer briefly, simply):
    - Was solar mentioned? If so, how many times?
@@ -289,12 +309,21 @@ Your job:
    noted as unverified/not found), and treat it as an unverified estimate either way.
 
 7. WRITE A CLEAN, STRUCTURED SUMMARY containing:
-   - Any corrections made (old value -> new value), if any
+   - Any corrections made (old value and new value, in plain human-readable date/time format)
    - The 5 quick call details from step 3
    - The employer research from step 4
    - The home sale history from step 5
    - The age estimate from Grok (step 6)
-   Keep it concise and easy to scan — short bullet points, not long paragraphs.
+
+   FORMATTING RULES — follow these exactly:
+   - Plain text only. No emojis, no decorative symbols, no arrows (like "->" or "→").
+   - No decorative divider lines (no "====", "----", "***", etc.) and no boxed/banner headers.
+   - Use simple section labels followed by a colon, on their own line (e.g. "Call details:",
+     "Employer:", "Home sale history:", "Age estimate:"), then plain bullet points with a
+     simple dash.
+   - Write all dates/times in plain human language (e.g. "June 25th at 11:00 AM"), never ISO
+     8601 timestamps.
+   - Keep it concise and easy to scan — short bullet points, not long paragraphs.
 
 8. Update the ACTIVITY's notes field (NOT the lead) with this summary, using
    update_activity_notes with activity_id={activity_id}. This tool handles fetching the
