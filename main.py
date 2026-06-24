@@ -51,7 +51,8 @@ def ask_grok(question):
         },
         json={
             "model": "grok-4",
-            "messages": [{"role": "user", "content": question}]
+            "messages": [{"role": "user", "content": question}],
+            "search_parameters": {"mode": "on"}
         }
     )
     print(f"DEBUG: Grok response status {response.status_code}, body: {response.text[:500]}")
@@ -131,8 +132,11 @@ tools = [
     {
         "name": "ask_grok",
         "description": (
-            "Ask Grok (xAI's LLM) a question and get its answer back as text. "
-            "Useful for a second opinion, alternate perspective, or anything you want Grok's take on."
+            "Ask Grok (xAI's LLM, with live web search enabled) a question and get its answer "
+            "back as text. Useful for a second opinion or anything you want Grok's take on. "
+            "When asking about a specific fact about a real person (e.g. their age), explicitly "
+            "require Grok to cite a source for the claim — these go into CRM notes, not verified "
+            "records, so an unsourced guess is not acceptable and should be reported as 'not found' instead."
         ),
         "input_schema": {
             "type": "object",
@@ -266,9 +270,12 @@ Your job:
    Redfin, or county property records). Note what you find (or that nothing reliable was found).
 
 6. ASK GROK FOR THE CUSTOMER'S AGE
-   Use ask_grok, giving it the customer's name and location, and ask it to estimate/provide the
-   customer's current age. Include whatever it answers in the notes (clearly labeled as Grok's
-   answer, and treat it as an unverified estimate).
+   Use ask_grok, giving it the customer's name and location, and ask it to find/estimate the
+   customer's current age. Explicitly require it to cite a source (e.g. a public record, article,
+   or profile) for any age/birth year it provides — tell it not to guess without one. If Grok
+   can't find a sourced answer, that's fine — just note "no verifiable age found." Include
+   whatever it answers in the notes, clearly labeled as Grok's answer with its cited source (or
+   noted as unverified/not found), and treat it as an unverified estimate either way.
 
 7. WRITE A CLEAN, STRUCTURED SUMMARY containing:
    - Any corrections made (old value -> new value), if any
