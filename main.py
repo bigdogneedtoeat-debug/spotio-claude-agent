@@ -57,23 +57,35 @@ XAI_API_KEY = os.environ.get("XAI_API_KEY")
 
 def ask_grok(question):
     response = requests.post(
-        "https://api.x.ai/v1/chat/completions",
+        "https://api.x.ai/v1/responses",
         headers={
             "Authorization": f"Bearer {XAI_API_KEY}",
             "Content-Type": "application/json"
         },
         json={
-            "model": "grok-4",
-            "messages": [{"role": "user", "content": question}],
-            "tools": [{"type": "live_search", "sources": [{"type": "web"}, {"type": "news"}]}],
-            "tool_choice": "auto"
+            "model": "grok-4.3",
+            "input": [{"role": "user", "content": question}],
+            "tools": [{"type": "web_search"}]
         }
     )
-    print(f"DEBUG: Grok response status {response.status_code}, body: {response.text[:500]}")
-    try:
-        return response.json()["choices"][0]["message"]["content"]
-    except Exception:
+    print(f"DEBUG: Grok response status {response.status_code}, body: {response.text[:800]}")
+
+    if response.status_code != 200:
         return f"Grok call failed: {response.status_code} {response.text[:300]}"
+
+    data = response.json()
+    if data.get("output_text"):
+        return data["output_text"]
+
+    try:
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content_block in item.get("content", []):
+                    if content_block.get("type") in ("output_text", "text"):
+                        return content_block.get("text", "")
+        return f"Grok call succeeded but no text found in response: {str(data)[:500]}"
+    except Exception as e:
+        return f"Grok call failed to parse: {repr(e)} | raw: {str(data)[:500]}"
 
 
 def update_spotio_field(record_type, record_id, fields):
