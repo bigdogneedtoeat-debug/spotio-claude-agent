@@ -52,7 +52,8 @@ def ask_grok(question):
         json={
             "model": "grok-4",
             "messages": [{"role": "user", "content": question}],
-            "search_parameters": {"mode": "on"}
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "auto"
         }
     )
     print(f"DEBUG: Grok response status {response.status_code}, body: {response.text[:500]}")
@@ -203,6 +204,16 @@ tools = [
 
 @app.post("/webhook")
 async def handle_lead(request: Request):
+    try:
+        return await process_lead(request)
+    except Exception as e:
+        import traceback
+        print(f"DEBUG: UNHANDLED EXCEPTION: {repr(e)}")
+        print(traceback.format_exc())
+        return {"status": "error", "detail": repr(e)}
+
+
+async def process_lead(request: Request):
     payload = await request.json()
     events = payload.get("payload", [])
     data = events[0].get("data", {}) if events else {}
@@ -308,35 +319,37 @@ Your job:
     loop_count = 0
     while response.stop_reason == "tool_use" and loop_count < 15:
         loop_count += 1
-        tool_use = next(b for b in response.content if b.type == "tool_use")
-        print(f"DEBUG: Claude called tool: {tool_use.name} with input: {tool_use.input}")
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
-        if tool_use.name == "transcribe_audio":
-            result = transcribe_audio(tool_use.input["url"])
-        elif tool_use.name == "ask_grok":
-            result = ask_grok(tool_use.input["question"])
-        elif tool_use.name == "update_spotio_field":
-            result = update_spotio_field(
-                tool_use.input["record_type"],
-                tool_use.input["record_id"],
-                tool_use.input["fields"]
-            )
-        elif tool_use.name == "update_activity_notes":
-            result = update_activity_notes(tool_use.input["activity_id"], tool_use.input["notes"])
-        elif tool_use.name == "spotio_api_call":
-            result = spotio_api_call(
-                tool_use.input["method"],
-                tool_use.input["path"],
-                tool_use.input.get("body")
-            )
-        else:
-            result = "handled automatically"
+        tool_results = []
+        for tool_use in tool_use_blocks:
+            print(f"DEBUG: Claude called tool: {tool_use.name} with input: {tool_use.input}")
+
+            if tool_use.name == "transcribe_audio":
+                result = transcribe_audio(tool_use.input["url"])
+            elif tool_use.name == "ask_grok":
+                result = ask_grok(tool_use.input["question"])
+            elif tool_use.name == "update_spotio_field":
+                result = update_spotio_field(
+                    tool_use.input["record_type"],
+                    tool_use.input["record_id"],
+                    tool_use.input["fields"]
+                )
+            elif tool_use.name == "update_activity_notes":
+                result = update_activity_notes(tool_use.input["activity_id"], tool_use.input["notes"])
+            elif tool_use.name == "spotio_api_call":
+                result = spotio_api_call(
+                    tool_use.input["method"],
+                    tool_use.input["path"],
+                    tool_use.input.get("body")
+                )
+            else:
+                result = "handled automatically"
+
+            tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)})
 
         messages.append({"role": "assistant", "content": response.content})
-        messages.append({
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)}]
-        })
+        messages.append({"role": "user", "content": tool_results})
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=4096, tools=tools, messages=messages
         )
