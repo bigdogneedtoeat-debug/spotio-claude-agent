@@ -65,7 +65,7 @@ def ask_grok(question):
         json={
             "model": "grok-4",
             "messages": [{"role": "user", "content": question}],
-            "tools": [{"type": "web_search"}],
+            "tools": [{"type": "live_search"}],
             "tool_choice": "auto"
         }
     )
