@@ -279,6 +279,19 @@ async def process_lead(request: Request):
         print(f"DEBUG: SKIPPING — activity not created by Growthify (assignedUserEmail='{assigned_email}'). activity_id={activity_id}")
         return {"status": f"skipped (not created by Growthify, assigned to '{assigned_email}')"}
 
+    # Fetch current live notes from Spotio before running anything expensive.
+    # The webhook payload reflects state at trigger time — our own PATCH update
+    # fires another webhook, so we must check live to avoid triple-processing.
+    token = get_spotio_token()
+    live_check = requests.get(
+        f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    if live_check.status_code == 200:
+        live_notes = live_check.json().get("notes", "")
+        if "AUTOMATED CALL REVIEW SUMMARY" in live_notes or "CALL SUMMARY" in live_notes:
+            print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
+            return {"status": "skipped (already processed)"}
 
     prompt = f"""A Spotio activity was created/updated:
 
