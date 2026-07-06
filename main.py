@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 import anthropic
 import requests
+import asyncio
 import os
 
 app = FastAPI()
@@ -292,6 +293,31 @@ async def process_lead(request: Request):
         if "AUTOMATED CALL REVIEW SUMMARY" in live_notes or "CALL SUMMARY" in live_notes:
             print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
             return {"status": "skipped (already processed)"}
+
+    if "drive.google.com" not in notes and "http" not in notes:
+        print(f"DEBUG: SKIPPING — no recording link found in activity notes. activity_id={activity_id}")
+        return {"status": "skipped (no recording link in notes)"}
+
+    # Wait 5 minutes before processing so Growthify has time to finish adding all recordings.
+    print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
+    await asyncio.sleep(300)
+
+    # Re-fetch the activity's live notes after the delay — recordings may have been added,
+    # or it may have already been processed by a duplicate webhook that fired sooner.
+    token = get_spotio_token()
+    refreshed = requests.get(
+        f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    if refreshed.status_code == 200:
+        refreshed_data = refreshed.json()
+        refreshed_notes = refreshed_data.get("notes", "")
+        if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
+            print(f"DEBUG: SKIPPING after delay — activity {activity_id} already processed.")
+            return {"status": "skipped (already processed after delay)"}
+        # Use the freshest notes (may have more recordings added after the initial webhook)
+        notes = refreshed_notes
+        print(f"DEBUG: Refreshed notes after delay: {notes[:200]}")
 
     prompt = f"""A Spotio activity was created/updated:
 
