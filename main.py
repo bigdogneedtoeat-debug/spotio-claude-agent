@@ -349,22 +349,31 @@ Your job:
    whatever it answers in the notes, clearly labeled as Grok's answer with its cited source (or
    noted as unverified/not found), and treat it as an unverified estimate either way.
 
-7. WRITE A CLEAN, STRUCTURED SUMMARY containing:
-   - Any corrections made (old value and new value, in plain human-readable date/time format)
-   - The 5 quick call details from step 3
-   - The employer research from step 4
-   - The home sale history from step 5
-   - The age estimate from Grok (step 6)
+7. WRITE A CLEAN, STRUCTURED SUMMARY using EXACTLY this format and structure:
 
-   FORMATTING RULES — follow these exactly:
-   - Plain text only. No emojis, no decorative symbols, no arrows (like "->" or "→").
-   - No decorative divider lines (no "====", "----", "***", etc.) and no boxed/banner headers.
-   - Use simple section labels followed by a colon, on their own line (e.g. "Call details:",
-     "Employer:", "Home sale history:", "Age estimate:"), then plain bullet points with a
-     simple dash.
-   - Write all dates/times in plain human language (e.g. "June 25th at 11:00 AM"), never ISO
-     8601 timestamps.
-   - Keep it concise and easy to scan — short bullet points, not long paragraphs.
+Corrections made:
+- [One short sentence: either "No corrections were necessary." followed by one sentence confirming address and appointment were verified, OR describe what was changed.]
+
+Call details:
+- Solar mentioned: [Yes/No and count, very brief]
+- In person visit expected: [Yes/No]
+- Does the customer plan to be home: [Answer, include relevant detail if they won't be home e.g. who will be there instead]
+- Confirmation call expected: [Yes/No]
+- Average electric bill: [Dollar amount or range only, no extra explanation]
+
+Customer information:
+- Employment: [One short phrase, e.g. "Active Duty Military" or "Owner, Beery Brothers (farm equipment)" or "Not found"]
+- Age estimate: [Either "Unverified" if Grok found nothing, or the estimate with source in parentheses]
+- Social media presence: [e.g. "None found" or "LinkedIn: [profile name/title]"]
+- Home sale history: [Address, key property facts in one sentence, then sale price/date if found. Keep to 2-3 sentences max.]
+
+   STRICT FORMATTING RULES:
+   - Plain text only. No emojis, no arrows, no decorative symbols.
+   - No divider lines (no "====", "----", "***") and no banner headers.
+   - Every bullet starts with a simple dash and a space.
+   - Dates/times in plain language only (e.g. "July 6th at 5:00 PM"), never ISO format.
+   - Keep answers short. Do not include source citations, methodology, or "I searched..." language in the notes — just the facts.
+   - If something was not found, just say "Not found" or "Unverified" — do not explain the search process.
 
 8. Update the ACTIVITY's notes field (NOT the lead) with this summary, using
    update_activity_notes with activity_id={activity_id}. This tool handles fetching the
