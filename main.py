@@ -265,14 +265,20 @@ async def process_lead(request: Request):
     lead_id = data_object.get("objectId", "")
     appointment_date = data.get("date", "")
     source = field_map.get("Source", "")
+    assigned_email = data_object.get("assignedUserEmail", "")
 
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
-        print(f"DEBUG: SKIPPING — activity_id={activity_id}, lead_id={lead_id} not in test allowlist {ALLOWED_TEST_IDS}")
+        print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
         return {"status": "skipped (not in test allowlist)"}
 
     if source.strip().lower() != "growthify":
         print(f"DEBUG: SKIPPING — lead source is '{source}', not Growthify. activity_id={activity_id}")
         return {"status": f"skipped (source is '{source}', not Growthify)"}
+
+    if assigned_email.strip().lower() != "info@growthifylabs.com":
+        print(f"DEBUG: SKIPPING — activity not created by Growthify (assignedUserEmail='{assigned_email}'). activity_id={activity_id}")
+        return {"status": f"skipped (not created by Growthify, assigned to '{assigned_email}')"}
+
 
     prompt = f"""A Spotio activity was created/updated:
 
