@@ -272,52 +272,47 @@ async def process_lead(request: Request):
         print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
         return {"status": "skipped (not in test allowlist)"}
 
-    if source.strip().lower() != "growthify":
-        print(f"DEBUG: SKIPPING — lead source is '{source}', not Growthify. activity_id={activity_id}")
-        return {"status": f"skipped (source is '{source}', not Growthify)"}
+    ALLOWED_SOURCES = ["growthify", "treasured leads"]
+    if source.strip().lower() not in ALLOWED_SOURCES:
+        print(f"DEBUG: SKIPPING — lead source is '{source}', not in allowed sources. activity_id={activity_id}")
+        return {"status": f"skipped (source is '{source}', not in allowed sources)"}
 
-    if assigned_email.strip().lower() != "info@growthifylabs.com":
-        print(f"DEBUG: SKIPPING — activity not created by Growthify (assignedUserEmail='{assigned_email}'). activity_id={activity_id}")
-        return {"status": f"skipped (not created by Growthify, assigned to '{assigned_email}')"}
+    ALLOWED_ASSIGNED_EMAILS = ["info@growthifylabs.com"]
+    if source.strip().lower() == "growthify" and assigned_email.strip().lower() not in ALLOWED_ASSIGNED_EMAILS:
+        print(f"DEBUG: SKIPPING — Growthify lead but not assigned to Growthify email ('{assigned_email}'). activity_id={activity_id}")
+        return {"status": f"skipped (Growthify lead not assigned to Growthify, assigned to '{assigned_email}')"}
 
-    # Fetch current live notes from Spotio before running anything expensive.
-    # The webhook payload reflects state at trigger time — our own PATCH update
-    # fires another webhook, so we must check live to avoid triple-processing.
-    token = get_spotio_token()
-    live_check = requests.get(
-        f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
-        headers={"Authorization": f"Bearer {token}"}
-    )
-    if live_check.status_code == 200:
-        live_notes = live_check.json().get("notes", "")
-        if "AUTOMATED CALL REVIEW SUMMARY" in live_notes or "CALL SUMMARY" in live_notes:
-            print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
-            return {"status": "skipped (already processed)"}
-
-    if "drive.google.com" not in notes and "http" not in notes:
-        print(f"DEBUG: SKIPPING — no recording link found in activity notes. activity_id={activity_id}")
-        return {"status": "skipped (no recording link in notes)"}
-
-    # Wait 5 minutes before processing so Growthify has time to finish adding all recordings.
+    # Wait 5 minutes before processing so the lead creator has time to finish
+    # adding all notes and recordings before we pull them.
     print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
     await asyncio.sleep(300)
 
-    # Re-fetch the activity's live notes after the delay — recordings may have been added,
-    # or it may have already been processed by a duplicate webhook that fired sooner.
+    # Re-fetch the activity's live notes after the delay.
+    # This is our single source of truth — catches AI-generated notes from a
+    # duplicate webhook that already ran, and picks up any recordings added after
+    # the initial webhook fired.
     token = get_spotio_token()
     refreshed = requests.get(
         f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
         headers={"Authorization": f"Bearer {token}"}
     )
-    if refreshed.status_code == 200:
-        refreshed_data = refreshed.json()
-        refreshed_notes = refreshed_data.get("notes", "")
-        if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
-            print(f"DEBUG: SKIPPING after delay — activity {activity_id} already processed.")
-            return {"status": "skipped (already processed after delay)"}
-        # Use the freshest notes (may have more recordings added after the initial webhook)
-        notes = refreshed_notes
-        print(f"DEBUG: Refreshed notes after delay: {notes[:200]}")
+    if refreshed.status_code != 200:
+        print(f"DEBUG: Could not fetch activity {activity_id} after delay: {refreshed.status_code}")
+        return {"status": f"error fetching activity after delay: {refreshed.status_code}"}
+
+    refreshed_notes = refreshed.json().get("notes", "")
+
+    if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
+        print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
+        return {"status": "skipped (already processed)"}
+
+    if "drive.google.com" not in refreshed_notes and "http" not in refreshed_notes:
+        print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
+        return {"status": "skipped (no recording link in notes)"}
+
+    # Use the freshest notes for the rest of the pipeline
+    notes = refreshed_notes
+    print(f"DEBUG: Notes after delay: {notes[:200]}")
 
     prompt = f"""A Spotio activity was created/updated:
 
