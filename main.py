@@ -288,9 +288,6 @@ async def process_lead(request: Request):
     await asyncio.sleep(300)
 
     # Re-fetch the activity's live notes after the delay.
-    # This is our single source of truth — catches AI-generated notes from a
-    # duplicate webhook that already ran, and picks up any recordings added after
-    # the initial webhook fired.
     token = get_spotio_token()
     refreshed = requests.get(
         f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
@@ -340,6 +337,13 @@ Your job:
      an obvious, unambiguous mistake, correct it using update_spotio_field with
      record_type="activity", record_id={activity_id}, fields={{"date": "..."}} (use ISO 8601
      format matching the original, e.g. 2026-06-25T14:00:00+00:00).
+     CRITICAL TIMEZONE RULE: Spotio stores all dates in UTC. All appointments in this
+     territory are Eastern Time (ET). During EDT (Mar-Nov): ET = UTC-4, so 10:00 AM ET =
+     14:00 UTC. During EST (Nov-Mar): ET = UTC-5, so 10:00 AM ET = 15:00 UTC. ALWAYS
+     convert what the customer/rep says on the call (Eastern) to UTC before comparing to
+     the Spotio value. Example: call says "10 AM", Spotio shows 14:00 UTC — these MATCH
+     (both are 10 AM ET). Do NOT correct this. Only correct if the Eastern times genuinely
+     differ from each other after converting both to the same timezone.
    - Only make a correction if you're confident it's a real mistake, not a guess. If you make
      any correction, note exactly what was changed in the notes. Write both the old and new
      date/time in plain, human-readable format (e.g. "June 25th at 11:00 AM"), not ISO 8601 —
