@@ -13,22 +13,18 @@ SPOTIO_CLIENT_SECRET = os.environ.get("SPOTIO_CLIENT_SECRET")
 
 SPOTIO_BASE = "https://api.spotio2.com"
 
-# SAFETY: only process these lead/activity IDs while testing.
-# Leave empty (i.e. "") in the ALLOWED_TEST_IDS env var to process everything (production mode).
 ALLOWED_TEST_IDS = [x.strip() for x in os.environ.get("ALLOWED_TEST_IDS", "").split(",") if x.strip()]
-
 
 import time
 
 _spotio_token_cache = {"token": None, "fetched_at": 0}
-SPOTIO_TOKEN_TTL_SECONDS = 45 * 60  # refresh every 45 min to be safe
+SPOTIO_TOKEN_TTL_SECONDS = 45 * 60
 
 
 def get_spotio_token():
     now = time.time()
     if _spotio_token_cache["token"] and (now - _spotio_token_cache["fetched_at"] < SPOTIO_TOKEN_TTL_SECONDS):
         return _spotio_token_cache["token"]
-
     response = requests.post(
         f"{SPOTIO_BASE}/api/users/apitoken",
         headers={"Accept": "text/plain", "Content-Type": "application/merge-patch+json"},
@@ -90,14 +86,8 @@ def ask_grok(question):
 
 
 def update_spotio_field(record_type, record_id, fields):
-    """
-    record_type: 'activity' or 'lead'
-    fields: dict of field(s) to merge-patch in, e.g. {"date": "2026-06-25T14:00:00+00:00"}
-            or {"address": {"fullAddress": "...", "street": "...", ...}}
-    """
     token = get_spotio_token()
     path_segment = "activities" if record_type == "activity" else "leads"
-
     patch_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/merge-patch+json",
@@ -109,13 +99,11 @@ def update_spotio_field(record_type, record_id, fields):
         json=fields
     )
     print(f"DEBUG: PATCH {record_type} {record_id} with {fields}: {patch_resp.status_code} {patch_resp.text[:1000]}")
-
     return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
 
 
 def update_activity_notes(activity_id, notes):
     token = get_spotio_token()
-
     patch_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/merge-patch+json",
@@ -127,7 +115,6 @@ def update_activity_notes(activity_id, notes):
         json={"notes": notes}
     )
     print(f"DEBUG: PATCH activity {activity_id}: {patch_resp.status_code} {patch_resp.text[:1000]}")
-
     return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
 
 
@@ -142,15 +129,12 @@ def truncate_result(text, limit=MAX_TOOL_RESULT_CHARS):
 
 
 def spotio_api_call(method, path, body=None):
-    """Generic Spotio API caller. path should start with /api/..."""
     token = get_spotio_token()
     url = f"{SPOTIO_BASE}{path}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     print(f"DEBUG: Spotio API call: {method} {url} body={body}")
     response = requests.request(method, url, headers=headers, json=body)
     print(f"DEBUG: Spotio API response: {response.status_code} {response.text[:1000]}")
-
     return f"Status: {response.status_code}\nBody: {response.text[:2000]}"
 
 
@@ -170,10 +154,9 @@ tools = [
         "name": "ask_grok",
         "description": (
             "Ask Grok (xAI's LLM, with live web search enabled) a question and get its answer "
-            "back as text. Useful for a second opinion or anything you want Grok's take on. "
-            "When asking about a specific fact about a real person (e.g. their age), explicitly "
-            "require Grok to cite a source for the claim — these go into CRM notes, not verified "
-            "records, so an unsourced guess is not acceptable and should be reported as 'not found' instead."
+            "back as text. When asking about a specific fact about a real person (e.g. their age), "
+            "explicitly require Grok to cite a source — unsourced guesses should be reported as "
+            "'not found' instead."
         ),
         "input_schema": {
             "type": "object",
@@ -185,11 +168,9 @@ tools = [
         "name": "update_spotio_field",
         "description": (
             "Correct a field on a Spotio activity (e.g. the appointment 'date') or a lead "
-            "(e.g. 'address'). Only use this when you've found a CLEAR, obvious mistake — "
-            "e.g. the call recording states a different appointment time or address than "
-            "what's in Spotio. record_type must be 'activity' or 'lead'. fields is an object "
-            "with just the field(s) you're correcting, e.g. {\"date\": \"2026-06-25T14:00:00+00:00\"} "
-            "for an activity, or {\"address\": {\"fullAddress\": \"123 Main St, City, ST 00000\"}} for a lead."
+            "(e.g. 'address'). Only use this when you've found a CLEAR, obvious mistake. "
+            "record_type must be 'activity' or 'lead'. fields is an object with just the "
+            "field(s) you're correcting."
         ),
         "input_schema": {
             "type": "object",
@@ -204,10 +185,8 @@ tools = [
     {
         "name": "update_activity_notes",
         "description": (
-            "Update the notes field on a Spotio activity. This automatically fetches the "
-            "current activity first, preserves all its other required fields with correct "
-            "data types, and writes back your new notes text. Use this instead of trying to "
-            "construct the raw API request yourself."
+            "Update the notes field on a Spotio activity. Just pass the activity_id "
+            "and your notes text."
         ),
         "input_schema": {
             "type": "object",
@@ -221,9 +200,8 @@ tools = [
     {
         "name": "spotio_api_call",
         "description": (
-            "Make a read-only (GET) request to the Spotio REST API (base URL https://api.spotio2.com) "
-            "for looking up additional info if needed. For updating activity notes, use "
-            "update_activity_notes instead — do not try to PUT/PATCH activities with this tool."
+            "Make a read-only (GET) request to the Spotio REST API for looking up additional "
+            "info if needed. For updating activity notes use update_activity_notes instead."
         ),
         "input_schema": {
             "type": "object",
@@ -268,6 +246,9 @@ async def process_lead(request: Request):
     source = field_map.get("Source", "")
     assigned_email = data_object.get("assignedUserEmail", "")
 
+    # Derive the activity creation date (date portion only) for day-of-week calculations
+    activity_created_date = data.get("date", "")[:10]
+
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
         print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
         return {"status": "skipped (not in test allowlist)"}
@@ -279,15 +260,12 @@ async def process_lead(request: Request):
 
     ALLOWED_ASSIGNED_EMAILS = ["info@growthifylabs.com"]
     if source.strip().lower() == "growthify" and assigned_email.strip().lower() not in ALLOWED_ASSIGNED_EMAILS:
-        print(f"DEBUG: SKIPPING — Growthify lead but not assigned to Growthify email ('{assigned_email}'). activity_id={activity_id}")
+        print(f"DEBUG: SKIPPING — Growthify lead not assigned to Growthify email. activity_id={activity_id}")
         return {"status": f"skipped (Growthify lead not assigned to Growthify, assigned to '{assigned_email}')"}
 
-    # Wait 5 minutes before processing so the lead creator has time to finish
-    # adding all notes and recordings before we pull them.
     print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
     await asyncio.sleep(300)
 
-    # Re-fetch the activity's live notes after the delay.
     token = get_spotio_token()
     refreshed = requests.get(
         f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
@@ -307,7 +285,6 @@ async def process_lead(request: Request):
         print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
         return {"status": "skipped (no recording link in notes)"}
 
-    # Use the freshest notes for the rest of the pipeline
     notes = refreshed_notes
     print(f"DEBUG: Notes after delay: {notes[:200]}")
 
@@ -316,6 +293,7 @@ async def process_lead(request: Request):
 Customer Name: {first_name} {last_name}
 Address on file: {address}
 Appointment date/time on file: {appointment_date}
+Activity created date: {activity_created_date}
 Activity notes (may contain a link): {notes}
 Activity ID: {activity_id}
 Related Lead ID: {lead_id}
@@ -337,18 +315,26 @@ Your job:
      an obvious, unambiguous mistake, correct it using update_spotio_field with
      record_type="activity", record_id={activity_id}, fields={{"date": "..."}} (use ISO 8601
      format matching the original, e.g. 2026-06-25T14:00:00+00:00).
+
      CRITICAL TIMEZONE RULE: Spotio stores all dates in UTC. All appointments in this
      territory are Eastern Time (ET). During EDT (Mar-Nov): ET = UTC-4, so 10:00 AM ET =
      14:00 UTC. During EST (Nov-Mar): ET = UTC-5, so 10:00 AM ET = 15:00 UTC. ALWAYS
      convert what the customer/rep says on the call (Eastern) to UTC before comparing to
      the Spotio value. Example: call says "10 AM", Spotio shows 14:00 UTC — these MATCH
      (both are 10 AM ET). Do NOT correct this. Only correct if the Eastern times genuinely
-     differ from each other after converting both to the same timezone.
-   - Only make a correction if you're confident it's a real mistake, not a guess. If you make
-     any correction, note exactly what was changed in the notes. Write both the old and new
-     date/time in plain, human-readable format (e.g. "June 25th at 11:00 AM"), not ISO 8601 —
-     the ISO format is only for the actual update_spotio_field call, never for what appears
-     in the notes.
+     differ after converting both to the same timezone.
+
+     CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of
+     the week a specific date falls on — this is error-prone. If the call mentions a day
+     name (e.g. "this Friday", "next Monday"), you MUST use web_search to confirm exactly
+     which calendar date that corresponds to, using the activity created date ({activity_created_date})
+     as your reference point for what "this week" means. Only after confirming the exact
+     date via web search should you compare it to the Spotio value and decide if a
+     correction is needed.
+
+   - Only make a correction if you're confident it's a real mistake. If you make any
+     correction, note exactly what was changed in the notes in plain human-readable format
+     (e.g. "July 10th at 5:00 PM"), never ISO format.
 
 3. EXTRACT THESE SPECIFIC DETAILS FROM THE CALL (answer briefly, simply):
    - Was solar mentioned? If so, how many times?
@@ -364,20 +350,17 @@ Your job:
 
 5. RESEARCH THE HOME SALE HISTORY
    Use web_search to find out when this home was last sold and for how much (e.g. via Zillow,
-   Redfin, or county property records). Note what you find (or that nothing reliable was found).
+   Redfin, or county property records). Note what you find (or nothing reliable was found).
 
 6. ASK GROK FOR THE CUSTOMER'S AGE
-   Use ask_grok, giving it the customer's name and location, and ask it to find/estimate the
-   customer's current age. Explicitly require it to cite a source (e.g. a public record, article,
-   or profile) for any age/birth year it provides — tell it not to guess without one. If Grok
-   can't find a sourced answer, that's fine — just note "no verifiable age found." Include
-   whatever it answers in the notes, clearly labeled as Grok's answer with its cited source (or
-   noted as unverified/not found), and treat it as an unverified estimate either way.
+   Use ask_grok, giving it the customer's name and location, and ask it to find the customer's
+   current age. Require it to cite a source for any age/birth year — no guessing. If it can't
+   find a sourced answer, note "no verifiable age found."
 
 7. WRITE A CLEAN, STRUCTURED SUMMARY using EXACTLY this format and structure:
 
 Corrections made:
-- [One short sentence: either "No corrections were necessary." followed by one sentence confirming address and appointment were verified, OR describe what was changed.]
+- [One short sentence: either "No corrections were necessary." followed by one sentence confirming address and appointment were verified, OR describe what was changed in plain language.]
 
 Call details:
 - Solar mentioned: [Yes/No and count, very brief]
@@ -387,23 +370,21 @@ Call details:
 - Average electric bill: [Dollar amount or range only, no extra explanation]
 
 Customer information:
-- Employment: [One short phrase, e.g. "Active Duty Military" or "Owner, Beery Brothers (farm equipment)" or "Not found"]
+- Employment: [One short phrase, or "Not found"]
 - Age estimate: [Either "Unverified" if Grok found nothing, or the estimate with source in parentheses]
 - Social media presence: [e.g. "None found" or "LinkedIn: [profile name/title]"]
-- Home sale history: [Address, key property facts in one sentence, then sale price/date if found. Keep to 2-3 sentences max.]
+- Home sale history: [Key property facts in one sentence, then sale price/date if found. 2-3 sentences max.]
 
    STRICT FORMATTING RULES:
    - Plain text only. No emojis, no arrows, no decorative symbols.
    - No divider lines (no "====", "----", "***") and no banner headers.
    - Every bullet starts with a simple dash and a space.
    - Dates/times in plain language only (e.g. "July 6th at 5:00 PM"), never ISO format.
-   - Keep answers short. Do not include source citations, methodology, or "I searched..." language in the notes — just the facts.
-   - If something was not found, just say "Not found" or "Unverified" — do not explain the search process.
+   - Keep answers short. No source citations, no methodology, no "I searched..." language.
+   - If something was not found, just say "Not found" or "Unverified."
 
 8. Update the ACTIVITY's notes field (NOT the lead) with this summary, using
-   update_activity_notes with activity_id={activity_id}. This tool handles fetching the
-   current activity and preserving its other fields for you — just pass the activity_id
-   and your notes text.
+   update_activity_notes with activity_id={activity_id}.
 
 9. Confirm the update succeeded by checking the response status code is 200.
 """
@@ -431,7 +412,7 @@ Customer information:
 
             if tool_use.name == "transcribe_audio":
                 result = transcribe_audio(tool_use.input["url"])
-                result_limit = None  # never truncate call transcripts, however long
+                result_limit = None
             elif tool_use.name == "ask_grok":
                 result = ask_grok(tool_use.input["question"])
                 result_limit = 3000
