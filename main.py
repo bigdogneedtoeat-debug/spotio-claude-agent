@@ -264,38 +264,27 @@ async def process_lead(request: Request):
         print(f"DEBUG: SKIPPING — Growthify lead not assigned to Growthify email. activity_id={activity_id}")
         return {"status": f"skipped (Growthify lead not assigned to Growthify, assigned to '{assigned_email}')"}
 
-    # Wait and retry loop — checks at 15min, 25min, and 35min after webhook fires.
-    # Treasured Leads sometimes adds recordings several minutes after creating the activity.
-    WAIT_INTERVALS = [900, 600, 600]  # 15 min, then +10 min, then +10 min
-    refreshed_notes = ""
+    print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
+    await asyncio.sleep(300)
 
-    for attempt, wait_seconds in enumerate(WAIT_INTERVALS, start=1):
-        print(f"DEBUG: Attempt {attempt} — waiting {wait_seconds // 60} minutes before checking activity {activity_id}...")
-        await asyncio.sleep(wait_seconds)
+    token = get_spotio_token()
+    refreshed = requests.get(
+        f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    if refreshed.status_code != 200:
+        print(f"DEBUG: Could not fetch activity {activity_id} after delay: {refreshed.status_code}")
+        return {"status": f"error fetching activity after delay: {refreshed.status_code}"}
 
-        token = get_spotio_token()
-        refreshed = requests.get(
-            f"{SPOTIO_BASE}/api/v2/activities/{activity_id}",
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        if refreshed.status_code != 200:
-            print(f"DEBUG: Could not fetch activity {activity_id} on attempt {attempt}: {refreshed.status_code}")
-            continue
+    refreshed_notes = refreshed.json().get("notes", "")
 
-        refreshed_notes = refreshed.json().get("notes", "")
+    if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
+        print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
+        return {"status": "skipped (already processed)"}
 
-        if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
-            print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
-            return {"status": "skipped (already processed)"}
-
-        if "drive.google.com" in refreshed_notes or "http" in refreshed_notes:
-            print(f"DEBUG: Recording link found on attempt {attempt}. Proceeding.")
-            break
-
-        print(f"DEBUG: No recording link found on attempt {attempt} for activity {activity_id}.")
-    else:
-        print(f"DEBUG: SKIPPING — no recording link found after all attempts. activity_id={activity_id}")
-        return {"status": "skipped (no recording link in notes after retries)"}
+    if "drive.google.com" not in refreshed_notes and "http" not in refreshed_notes:
+        print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
+        return {"status": "skipped (no recording link in notes)"}
 
     notes = refreshed_notes
     print(f"DEBUG: Notes after delay: {notes[:200]}")
