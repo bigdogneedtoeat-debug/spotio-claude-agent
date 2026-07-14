@@ -88,17 +88,33 @@ def ask_grok(question):
 def update_lead_utility(lead_id, utility_value):
     """
     Find the 'Utility' custom field on the lead and update it.
-    Fetches the lead first to locate the field ID, then PATCHes it.
+    Tries multiple endpoint paths since Spotio's v2 API calls leads 'dataObjects' in webhooks.
     """
     token = get_spotio_token()
     headers = {"Authorization": f"Bearer {token}"}
 
-    get_resp = requests.get(f"{SPOTIO_BASE}/api/v2/leads/{lead_id}", headers=headers)
-    print(f"DEBUG: GET lead {lead_id}: {get_resp.status_code} {get_resp.text[:500]}")
-    if get_resp.status_code != 200:
-        return f"Failed to fetch lead: {get_resp.status_code} {get_resp.text[:300]}"
+    candidate_paths = [
+        f"/api/v2/dataobjects/{lead_id}",
+        f"/api/v2/data-objects/{lead_id}",
+        f"/api/v2/leads/{lead_id}",
+        f"/api/leads/{lead_id}",
+    ]
 
-    lead_data = get_resp.json()
+    lead_data = None
+    working_path = None
+    for path in candidate_paths:
+        get_resp = requests.get(f"{SPOTIO_BASE}{path}", headers=headers)
+        print(f"DEBUG: GET {path}: {get_resp.status_code}")
+        if get_resp.status_code == 200:
+            lead_data = get_resp.json()
+            working_path = path
+            break
+
+    if lead_data is None:
+        return f"Failed to fetch lead {lead_id} — all endpoint paths returned errors. Tried: {candidate_paths}"
+
+    print(f"DEBUG: lead data from {working_path}: {str(lead_data)[:500]}")
+
     existing_fields = lead_data.get("fields", [])
     utility_field_id = None
     for f in existing_fields:
@@ -107,7 +123,7 @@ def update_lead_utility(lead_id, utility_value):
             break
 
     if utility_field_id is None:
-        return f"No 'Utility' field found on lead {lead_id}. Available fields: {[f.get('title') for f in existing_fields]}"
+        utility_field_id = 20  # known Utility field id from webhook payloads, fallback
 
     patch_headers = {
         "Authorization": f"Bearer {token}",
@@ -115,11 +131,11 @@ def update_lead_utility(lead_id, utility_value):
         "Accept": "text/plain"
     }
     patch_resp = requests.patch(
-        f"{SPOTIO_BASE}/api/v2/leads/{lead_id}",
+        f"{SPOTIO_BASE}{working_path}",
         headers=patch_headers,
         json={"fields": [{"id": utility_field_id, "values": [utility_value]}]}
     )
-    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}': {patch_resp.status_code} {patch_resp.text[:500]}")
+    print(f"DEBUG: PATCH {working_path} utility -> '{utility_value}': {patch_resp.status_code} {patch_resp.text[:500]}")
     return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:500]}"
 
 
