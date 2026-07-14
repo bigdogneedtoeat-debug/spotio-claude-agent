@@ -85,6 +85,44 @@ def ask_grok(question):
         return f"Grok call failed to parse: {repr(e)} | raw: {str(data)[:500]}"
 
 
+def update_lead_utility(lead_id, utility_value):
+    """
+    Find the 'Utility' custom field on the lead and update it.
+    Fetches the lead first to locate the field ID, then PATCHes it.
+    """
+    token = get_spotio_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    get_resp = requests.get(f"{SPOTIO_BASE}/api/v2/leads/{lead_id}", headers=headers)
+    print(f"DEBUG: GET lead {lead_id}: {get_resp.status_code} {get_resp.text[:500]}")
+    if get_resp.status_code != 200:
+        return f"Failed to fetch lead: {get_resp.status_code} {get_resp.text[:300]}"
+
+    lead_data = get_resp.json()
+    existing_fields = lead_data.get("fields", [])
+    utility_field_id = None
+    for f in existing_fields:
+        if f.get("title", "").strip().lower() == "utility":
+            utility_field_id = f.get("id")
+            break
+
+    if utility_field_id is None:
+        return f"No 'Utility' field found on lead {lead_id}. Available fields: {[f.get('title') for f in existing_fields]}"
+
+    patch_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/merge-patch+json",
+        "Accept": "text/plain"
+    }
+    patch_resp = requests.patch(
+        f"{SPOTIO_BASE}/api/v2/leads/{lead_id}",
+        headers=patch_headers,
+        json={"fields": [{"id": utility_field_id, "values": [utility_value]}]}
+    )
+    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}': {patch_resp.status_code} {patch_resp.text[:500]}")
+    return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:500]}"
+
+
 def update_spotio_field(record_type, record_id, fields):
     token = get_spotio_token()
     path_segment = "activities" if record_type == "activity" else "leads"
@@ -162,6 +200,24 @@ tools = [
             "type": "object",
             "properties": {"question": {"type": "string"}},
             "required": ["question"]
+        }
+    },
+    {
+        "name": "update_lead_utility",
+        "description": (
+            "Update the Utility field on a Spotio lead. Pass the lead_id and the utility "
+            "value exactly as it appears in Spotio's allowed options: "
+            "'Dominion', 'NOVEC', 'REC', 'SVEC', 'Potomac Edison WV', "
+            "'Potomac Edison MD', 'BG&E', 'PEPCO', or 'Other'. "
+            "Only call this if you identified the utility from the call transcript."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lead_id": {"type": "string"},
+                "utility_value": {"type": "string"}
+            },
+            "required": ["lead_id", "utility_value"]
         }
     },
     {
@@ -343,11 +399,25 @@ Your job:
    - Does the customer plan to be home?
    - Are they expecting a call beforehand?
    - What does the customer think their average electric bill is?
+   - What is the customer's electric utility provider? Match it to the closest option from
+     this list: Dominion, NOVEC, REC, SVEC, Potomac Edison WV, Potomac Edison MD, BG&E,
+     PEPCO, Other. If the utility is mentioned but doesn't clearly match any option, use
+     "Other". If it's not mentioned at all, leave it blank.
 
-4. RESEARCH THE CUSTOMER'S EMPLOYER
+3b. UPDATE THE UTILITY FIELD
+   If you identified the utility in step 3, call update_lead_utility with
+   lead_id={lead_id} and the matched utility value. Only skip this if the utility
+   was not mentioned at all in the call.
+
+4. RESEARCH THE CUSTOMER'S EMPLOYER AND PERSONALITY
    Use web_search to try to match this customer's name (and location, to disambiguate) to a
-   Facebook or LinkedIn profile, to determine who they work for / what company. Note what you
-   find (or that nothing reliable was found).
+   Facebook or LinkedIn profile, to determine who they work for / what company.
+   If a profile is found, use web_fetch to open it and scan its content (posts, bio, about
+   section, job history, interests). Write a two-sentence personality/life summary based on
+   what you find — e.g. their lifestyle, interests, family situation, career, or community
+   involvement. Keep it factual and observational, not evaluative.
+   If the profile is blocked or inaccessible (login wall, bot block), note that access was
+   blocked and skip the personality summary. If no profile is found at all, note "not found."
 
 5. RESEARCH THE HOME SALE HISTORY
    Use web_search to find out when this home was last sold and for how much (e.g. via Zillow,
@@ -369,9 +439,11 @@ Call details:
 - Does the customer plan to be home: [Answer, include relevant detail if they won't be home e.g. who will be there instead]
 - Confirmation call expected: [Yes/No]
 - Average electric bill: [Dollar amount or range only, no extra explanation]
+- Utility: [Matched option from allowed list, or "Not mentioned"]
 
 Customer information:
 - Employment: [One short phrase, or "Not found"]
+- Personality profile: [Two sentences from social media scan, or "Profile blocked" or "Not found"]
 - Age estimate: [Either "Unverified" if Grok found nothing, or the estimate with source in parentheses]
 - Social media presence: [e.g. "None found" or "LinkedIn: [profile name/title]"]
 - Home sale history: [Key property facts in one sentence, then sale price/date if found. 2-3 sentences max.]
@@ -414,6 +486,9 @@ Customer information:
             if tool_use.name == "transcribe_audio":
                 result = transcribe_audio(tool_use.input["url"])
                 result_limit = None
+            elif tool_use.name == "update_lead_utility":
+                result = update_lead_utility(tool_use.input["lead_id"], tool_use.input["utility_value"])
+                result_limit = 1000
             elif tool_use.name == "ask_grok":
                 result = ask_grok(tool_use.input["question"])
                 result_limit = 3000
