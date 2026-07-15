@@ -350,18 +350,86 @@ async def process_lead(request: Request):
 
     refreshed_notes = refreshed.json().get("notes", "")
 
-    if "AUTOMATED CALL REVIEW SUMMARY" in refreshed_notes or "CALL SUMMARY" in refreshed_notes:
-        print(f"DEBUG: SKIPPING — activity {activity_id} already has AI-generated notes.")
-        return {"status": "skipped (already processed)"}
+    import re
+    def extract_links(text):
+        return set(re.findall(r'https?://[^\s\'"<>)]+', text))
 
-    if "drive.google.com" not in refreshed_notes and "http" not in refreshed_notes:
-        print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
-        return {"status": "skipped (no recording link in notes)"}
+    all_links = extract_links(refreshed_notes)
+    drive_links = {l for l in all_links if "drive.google.com" in l}
+
+    already_processed = "CALL SUMMARY" in refreshed_notes or "Corrections made:" in refreshed_notes
+
+    is_confirmation_rerun = False
+    new_links = set()
+
+    if already_processed:
+        # Find which links are listed in the "Recordings processed:" section of our summary.
+        processed_section = ""
+        if "Recordings processed:" in refreshed_notes:
+            processed_section = refreshed_notes.split("Recordings processed:")[1]
+        processed_links = extract_links(processed_section)
+
+        new_links = drive_links - processed_links
+        if not new_links:
+            print(f"DEBUG: SKIPPING — activity {activity_id} already processed, no new recordings.")
+            return {"status": "skipped (already processed, no new recordings)"}
+
+        is_confirmation_rerun = True
+        print(f"DEBUG: RERUN — {len(new_links)} new recording(s) found on already-processed activity {activity_id}: {new_links}")
+    else:
+        if not drive_links and "http" not in refreshed_notes:
+            print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
+            return {"status": "skipped (no recording link in notes)"}
 
     notes = refreshed_notes
     print(f"DEBUG: Notes after delay: {notes[:200]}")
 
-    prompt = f"""A Spotio activity was created/updated:
+    if is_confirmation_rerun:
+        prompt = f"""A confirmation/follow-up call was added to a Spotio activity that was already processed.
+
+Customer Name: {first_name} {last_name}
+Address on file: {address}
+Appointment date/time on file: {appointment_date}
+Activity created date: {activity_created_date}
+Current activity notes (contains the previous AI summary): {notes}
+NEW recording link(s) to process: {', '.join(new_links)}
+Activity ID: {activity_id}
+Related Lead ID: {lead_id}
+
+Your job (LIMITED SCOPE — this is a follow-up call check, not a full workup):
+
+1. TRANSCRIBE ONLY THE NEW RECORDING(S) listed above. Use web_fetch to resolve the Google
+   Drive link to a direct download URL, then transcribe_audio.
+
+2. CHECK FOR APPOINTMENT OR ADDRESS CHANGES in the new call.
+   - Compare against the appointment date/time and address on file above.
+   - CRITICAL TIMEZONE RULE: Spotio stores all dates in UTC. All appointments are Eastern
+     Time (ET). During EDT (Mar-Nov): ET = UTC-4. During EST (Nov-Mar): ET = UTC-5. ALWAYS
+     convert the time said on the call (Eastern) to UTC before comparing. Example: call says
+     "10 AM", Spotio shows 14:00 UTC — these MATCH. Do NOT correct.
+   - CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of the
+     week a date falls on. If the call mentions a day name (e.g. "this Friday"), use
+     web_search to confirm the exact calendar date, using the activity created date
+     ({activity_created_date}) as reference.
+   - If the appointment genuinely changed, update it with update_spotio_field
+     (record_type="activity", record_id={activity_id}, fields={{"date": "..."}}).
+   - If the address genuinely changed, update it with update_spotio_field
+     (record_type="lead", record_id={lead_id}).
+
+3. UPDATE THE NOTES using update_activity_notes with activity_id={activity_id}:
+   - Keep the existing summary largely intact.
+   - Update the "Corrections made:" line if you made a change (plain language dates only).
+   - Add a short "Confirmation call:" line under Call details noting the outcome (e.g.
+     "Confirmed for July 20th at 6:30 PM" or "Rescheduled to July 22nd at 5:00 PM").
+   - Update the "Recordings processed:" section at the bottom to include ALL recording
+     links (previous ones plus the new one(s)).
+   - Same formatting rules as before: plain text, no emojis, no dividers, no ISO dates.
+
+4. Confirm the update succeeded (status 200). Do NOT redo employer research, home sale
+   history, Grok age lookup, or personality profile — those are already done.
+"""
+    else:
+        prompt = f"""A Spotio activity was created/updated:
 
 Customer Name: {first_name} {last_name}
 Address on file: {address}
@@ -463,6 +531,9 @@ Customer information:
 - Age estimate: [Either "Unverified" if Grok found nothing, or the estimate with source in parentheses]
 - Social media presence: [e.g. "None found" or "LinkedIn: [profile name/title]"]
 - Home sale history: [Key property facts in one sentence, then sale price/date if found. 2-3 sentences max.]
+
+Recordings processed:
+- [List every recording link you transcribed, one full URL per line. This section is REQUIRED — it is used to detect new recordings added later.]
 
    STRICT FORMATTING RULES:
    - Plain text only. No emojis, no arrows, no decorative symbols.
