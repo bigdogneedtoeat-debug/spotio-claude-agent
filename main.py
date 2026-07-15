@@ -87,56 +87,59 @@ def ask_grok(question):
 
 def update_lead_utility(lead_id, utility_value):
     """
-    Find the 'Utility' custom field on the lead and update it.
-    Tries multiple endpoint paths since Spotio's v2 API calls leads 'dataObjects' in webhooks.
+    Update the 'Utility' custom field (id 20) on a Spotio lead.
+    GET works at /api/leads/{id} (v1). Tries several PATCH/PUT body formats
+    since the exact format the v1 endpoint accepts is undocumented.
     """
     token = get_spotio_token()
     headers = {"Authorization": f"Bearer {token}"}
 
-    candidate_paths = [
-        f"/api/v2/dataobjects/{lead_id}",
-        f"/api/v2/data-objects/{lead_id}",
-        f"/api/v2/leads/{lead_id}",
-        f"/api/leads/{lead_id}",
-    ]
+    get_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
+    print(f"DEBUG: GET /api/leads/{lead_id}: {get_resp.status_code}")
+    if get_resp.status_code != 200:
+        return f"Failed to fetch lead: {get_resp.status_code}"
 
-    lead_data = None
-    working_path = None
-    for path in candidate_paths:
-        get_resp = requests.get(f"{SPOTIO_BASE}{path}", headers=headers)
-        print(f"DEBUG: GET {path}: {get_resp.status_code}")
-        if get_resp.status_code == 200:
-            lead_data = get_resp.json()
-            working_path = path
-            break
-
-    if lead_data is None:
-        return f"Failed to fetch lead {lead_id} — all endpoint paths returned errors. Tried: {candidate_paths}"
-
-    print(f"DEBUG: lead data from {working_path}: {str(lead_data)[:500]}")
+    lead_data = get_resp.json()
+    print(f"DEBUG: lead data keys: {list(lead_data.keys())}")
+    print(f"DEBUG: lead fields: {str(lead_data.get('fields', ''))[:500]}")
 
     existing_fields = lead_data.get("fields", [])
-    utility_field_id = None
+    utility_field_id = 20
     for f in existing_fields:
-        if f.get("title", "").strip().lower() == "utility":
-            utility_field_id = f.get("id")
+        if isinstance(f, dict) and f.get("title", "").strip().lower() == "utility":
+            utility_field_id = f.get("id", 20)
             break
 
-    if utility_field_id is None:
-        utility_field_id = 20  # known Utility field id from webhook payloads, fallback
+    attempts = [
+        # (method, content-type, body)
+        ("PATCH", "application/merge-patch+json",
+         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
+        ("PATCH", "application/json",
+         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
+        ("PUT", "application/json",
+         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
+        ("PATCH", "application/merge-patch+json",
+         {"fields": [{"id": utility_field_id, "title": "Utility", "values": [utility_value]}]}),
+        ("PATCH", "application/merge-patch+json",
+         {"customFields": [{"id": utility_field_id, "values": [utility_value]}]}),
+    ]
 
-    patch_headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/merge-patch+json",
-        "Accept": "text/plain"
-    }
-    patch_resp = requests.patch(
-        f"{SPOTIO_BASE}{working_path}",
-        headers=patch_headers,
-        json={"fields": [{"id": utility_field_id, "values": [utility_value]}]}
-    )
-    print(f"DEBUG: PATCH {working_path} utility -> '{utility_value}': {patch_resp.status_code} {patch_resp.text[:500]}")
-    return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:500]}"
+    for method, content_type, body in attempts:
+        resp = requests.request(
+            method,
+            f"{SPOTIO_BASE}/api/leads/{lead_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": content_type,
+                "Accept": "text/plain"
+            },
+            json=body
+        )
+        print(f"DEBUG: {method} ({content_type}) body={body} -> {resp.status_code} {resp.text[:300]}")
+        if resp.status_code in (200, 204):
+            return f"SUCCESS via {method} ({content_type}): {resp.status_code}"
+
+    return f"All utility update attempts failed. See DEBUG logs for each attempt's status and error body."
 
 
 def update_spotio_field(record_type, record_id, fields):
