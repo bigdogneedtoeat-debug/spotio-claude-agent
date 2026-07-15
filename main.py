@@ -293,17 +293,49 @@ tools = [
 
 @app.post("/webhook")
 async def handle_lead(request: Request):
+    # Read the payload NOW (request object can't be used after we return),
+    # then acknowledge immediately and process in the background.
+    # Spotio retries deliveries if we don't respond quickly — our old code slept
+    # 5 minutes before responding, causing every event to be delivered 3-5 times.
     try:
-        return await process_lead(request)
+        payload = await request.json()
+    except Exception as e:
+        print(f"DEBUG: Could not parse webhook payload: {repr(e)}")
+        return {"status": "bad payload"}
+
+    asyncio.create_task(process_lead_safe(payload))
+    return {"status": "accepted"}
+
+
+# Track activities currently being processed to dedupe rapid duplicate deliveries
+_in_flight_activities = set()
+
+
+async def process_lead_safe(payload):
+    activity_id = ""
+    try:
+        events = payload.get("payload", [])
+        data = events[0].get("data", {}) if events else {}
+        activity_id = str(data.get("id", "") or data.get("objectId", ""))
+
+        if activity_id and activity_id in _in_flight_activities:
+            print(f"DEBUG: SKIPPING — activity {activity_id} is already being processed (duplicate delivery).")
+            return
+
+        if activity_id:
+            _in_flight_activities.add(activity_id)
+
+        await process_lead(payload)
     except Exception as e:
         import traceback
         print(f"DEBUG: UNHANDLED EXCEPTION: {repr(e)}")
         print(traceback.format_exc())
-        return {"status": "error", "detail": repr(e)}
+    finally:
+        if activity_id:
+            _in_flight_activities.discard(activity_id)
 
 
-async def process_lead(request: Request):
-    payload = await request.json()
+async def process_lead(payload):
     events = payload.get("payload", [])
     data = events[0].get("data", {}) if events else {}
     data_object = data.get("dataObject", {})
@@ -338,6 +370,14 @@ async def process_lead(request: Request):
     if source.strip().lower() == "growthify" and assigned_email.strip().lower() not in ALLOWED_ASSIGNED_EMAILS:
         print(f"DEBUG: SKIPPING — Growthify lead not assigned to Growthify email. activity_id={activity_id}")
         return {"status": f"skipped (Growthify lead not assigned to Growthify, assigned to '{assigned_email}')"}
+
+    # Skip leads created before the cutoff date — avoids processing stale/old leads
+    # whose activities get touched by rep edits or bulk updates.
+    LEAD_CUTOFF_DATE = "2026-07-01"
+    lead_created_at = data_object.get("createdAt", "")[:10]
+    if lead_created_at and lead_created_at < LEAD_CUTOFF_DATE:
+        print(f"DEBUG: SKIPPING — lead created {lead_created_at}, before cutoff {LEAD_CUTOFF_DATE}. activity_id={activity_id}")
+        return {"status": f"skipped (lead created {lead_created_at}, before cutoff)"}
 
     print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
     await asyncio.sleep(300)
