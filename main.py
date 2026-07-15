@@ -88,73 +88,35 @@ def ask_grok(question):
 def update_lead_utility(lead_id, utility_value):
     """
     Update the 'Utility' custom field (id 20) on a Spotio lead.
-    GET works at /api/leads/{id} (v1). Tries several PATCH/PUT body formats
-    since the exact format the v1 endpoint accepts is undocumented.
+    Proven working format: PATCH /api/leads/{id} with merge-patch and 'customFields'.
     """
     token = get_spotio_token()
-    headers = {"Authorization": f"Bearer {token}"}
-
-    get_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
-    print(f"DEBUG: GET /api/leads/{lead_id}: {get_resp.status_code}")
-    if get_resp.status_code != 200:
-        return f"Failed to fetch lead: {get_resp.status_code}"
-
-    lead_data = get_resp.json()
-    print(f"DEBUG: lead data keys: {list(lead_data.keys())}")
-    print(f"DEBUG: lead fields: {str(lead_data.get('fields', ''))[:500]}")
-
-    existing_fields = lead_data.get("fields", [])
-    utility_field_id = 20
-    for f in existing_fields:
-        if isinstance(f, dict) and f.get("title", "").strip().lower() == "utility":
-            utility_field_id = f.get("id", 20)
-            break
-
-    attempts = [
-        # (method, content-type, body)
-        ("PATCH", "application/merge-patch+json",
-         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
-        ("PATCH", "application/json",
-         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
-        ("PUT", "application/json",
-         {"fields": [{"id": utility_field_id, "values": [utility_value]}]}),
-        ("PATCH", "application/merge-patch+json",
-         {"fields": [{"id": utility_field_id, "title": "Utility", "values": [utility_value]}]}),
-        ("PATCH", "application/merge-patch+json",
-         {"customFields": [{"id": utility_field_id, "values": [utility_value]}]}),
-    ]
-
-    for method, content_type, body in attempts:
-        resp = requests.request(
-            method,
-            f"{SPOTIO_BASE}/api/leads/{lead_id}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": content_type,
-                "Accept": "text/plain"
-            },
-            json=body
-        )
-        print(f"DEBUG: {method} ({content_type}) body={body} -> {resp.status_code} {resp.text[:300]}")
-        if resp.status_code in (200, 204):
-            return f"SUCCESS via {method} ({content_type}): {resp.status_code}"
-
-    return f"All utility update attempts failed. See DEBUG logs for each attempt's status and error body."
+    resp = requests.patch(
+        f"{SPOTIO_BASE}/api/leads/{lead_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/merge-patch+json",
+            "Accept": "text/plain"
+        },
+        json={"customFields": [{"id": 20, "values": [utility_value]}]}
+    )
+    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}': {resp.status_code} {resp.text[:300]}")
+    return f"Status: {resp.status_code}\nBody: {resp.text[:300]}"
 
 
 def update_spotio_field(record_type, record_id, fields):
     token = get_spotio_token()
-    path_segment = "activities" if record_type == "activity" else "leads"
+    # Activities use the v2 endpoint; leads use the v1 endpoint (v2 leads path 404s).
+    if record_type == "activity":
+        url = f"{SPOTIO_BASE}/api/v2/activities/{record_id}"
+    else:
+        url = f"{SPOTIO_BASE}/api/leads/{record_id}"
     patch_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/merge-patch+json",
         "Accept": "text/plain"
     }
-    patch_resp = requests.patch(
-        f"{SPOTIO_BASE}/api/v2/{path_segment}/{record_id}",
-        headers=patch_headers,
-        json=fields
-    )
+    patch_resp = requests.patch(url, headers=patch_headers, json=fields)
     print(f"DEBUG: PATCH {record_type} {record_id} with {fields}: {patch_resp.status_code} {patch_resp.text[:1000]}")
     return f"Status: {patch_resp.status_code}\nBody: {patch_resp.text[:1000]}"
 
