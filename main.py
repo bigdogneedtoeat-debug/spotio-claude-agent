@@ -88,9 +88,39 @@ def ask_grok(question):
 def update_lead_utility(lead_id, utility_value):
     """
     Update the 'Utility' custom field (id 20) on a Spotio lead.
-    Proven working format: PATCH /api/leads/{id} with merge-patch and 'customFields'.
+    IMPORTANT: Spotio's customFields merge-patch REPLACES the field collection rather
+    than merging it, which was wiping First Name / Last Name on leads. Fix: fetch the
+    lead's current fields first and include ALL of them in the patch alongside the
+    updated utility value.
     """
     token = get_spotio_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    get_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
+    print(f"DEBUG: GET /api/leads/{lead_id}: {get_resp.status_code}")
+    if get_resp.status_code != 200:
+        return f"Failed to fetch lead before utility update: {get_resp.status_code}"
+
+    lead_data = get_resp.json()
+    existing = lead_data.get("customFields") or lead_data.get("fields") or []
+    print(f"DEBUG: existing fields before patch: {str(existing)[:500]}")
+
+    # Rebuild the full field list, updating (or adding) the Utility field (id 20)
+    merged = []
+    utility_found = False
+    for f in existing:
+        if not isinstance(f, dict):
+            continue
+        fid = f.get("id")
+        values = f.get("values") or []
+        if str(fid) == "20":
+            merged.append({"id": 20, "values": [utility_value]})
+            utility_found = True
+        else:
+            merged.append({"id": fid, "values": values})
+    if not utility_found:
+        merged.append({"id": 20, "values": [utility_value]})
+
     resp = requests.patch(
         f"{SPOTIO_BASE}/api/leads/{lead_id}",
         headers={
@@ -98,9 +128,9 @@ def update_lead_utility(lead_id, utility_value):
             "Content-Type": "application/merge-patch+json",
             "Accept": "text/plain"
         },
-        json={"customFields": [{"id": 20, "values": [utility_value]}]}
+        json={"customFields": merged}
     )
-    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}': {resp.status_code} {resp.text[:300]}")
+    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}' ({len(merged)} fields preserved): {resp.status_code} {resp.text[:300]}")
     return f"Status: {resp.status_code}\nBody: {resp.text[:300]}"
 
 
@@ -257,8 +287,6 @@ tools = [
 async def handle_lead(request: Request):
     # Read the payload NOW (request object can't be used after we return),
     # then acknowledge immediately and process in the background.
-    # Spotio retries deliveries if we don't respond quickly — our old code slept
-    # 5 minutes before responding, causing every event to be delivered 3-5 times.
     try:
         payload = await request.json()
     except Exception as e:
