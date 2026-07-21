@@ -85,41 +85,87 @@ def ask_grok(question):
         return f"Grok call failed to parse: {repr(e)} | raw: {str(data)[:500]}"
 
 
-def update_lead_utility(lead_id, utility_value):
+def normalize_field_entry(f):
     """
-    Update the 'Utility' custom field (id 20) on a Spotio lead.
-    IMPORTANT: Spotio's customFields merge-patch REPLACES the field collection rather
-    than merging it, which was wiping First Name / Last Name on leads. Fix: fetch the
-    lead's current fields first and include ALL of them in the patch alongside the
-    updated utility value.
+    Normalize a Spotio field entry to the {"id": <int/str>, "values": [..]} shape
+    that the PATCH endpoint expects.
+
+    Spotio uses TWO different shapes:
+      - Webhook payload / PATCH format: {"id": 9, "values": ["..."], "title": "Phone"}
+      - GET /api/leads/{id} format:     {"fieldId": "9", "value": "..."}
+
+    Returns None if no usable field id is present (never send id=None to Spotio —
+    that's what wiped the leads).
+    """
+    if not isinstance(f, dict):
+        return None
+
+    fid = f.get("id", f.get("fieldId"))
+    if fid is None or str(fid).strip() == "":
+        return None
+
+    if "values" in f:
+        values = f.get("values") or []
+    elif "value" in f:
+        v = f.get("value")
+        values = [v] if v is not None else []
+    else:
+        values = []
+
+    return {"id": fid, "values": values}
+
+
+def update_lead_utility(lead_id, utility_value, webhook_fields=None):
+    """
+    Update the 'Utility' custom field (id 20) on a Spotio lead WITHOUT wiping
+    the other fields.
+
+    WHY THIS IS BUILT THE WAY IT IS (learned the hard way):
+    1. Spotio's merge-patch REPLACES the entire customFields collection, so the
+       patch must include EVERY field, not just Utility.
+    2. GET /api/leads/{id} returns fields in a DIFFERENT shape than the PATCH
+       expects ({"fieldId": "9", "value": "..."} vs {"id": 9, "values": [...]}),
+       AND it does NOT return the First Name (100002) / Last Name (100003)
+       fields at all. So the GET alone can never preserve names.
+    3. The webhook payload's dataObject.fields DOES include the names, in the
+       correct PATCH shape. So we start from the webhook snapshot, then overlay
+       any (normalized) fields from a fresh GET, which are more up to date for
+       the fields the GET does return.
     """
     token = get_spotio_token()
     headers = {"Authorization": f"Bearer {token}"}
 
+    # Start with the webhook snapshot (includes First/Last Name in correct shape)
+    merged_by_id = {}
+    for f in (webhook_fields or []):
+        norm = normalize_field_entry(f)
+        if norm:
+            merged_by_id[str(norm["id"])] = norm
+
+    # Overlay fresher values from a live GET (normalizing its different shape).
+    # Fields the GET doesn't return (the names) stay from the webhook snapshot.
     get_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
     print(f"DEBUG: GET /api/leads/{lead_id}: {get_resp.status_code}")
-    if get_resp.status_code != 200:
-        return f"Failed to fetch lead before utility update: {get_resp.status_code}"
+    if get_resp.status_code == 200:
+        lead_data = get_resp.json()
+        existing = lead_data.get("customFields") or lead_data.get("fields") or []
+        print(f"DEBUG: existing fields from GET: {str(existing)[:500]}")
+        for f in existing:
+            norm = normalize_field_entry(f)
+            if norm:
+                merged_by_id[str(norm["id"])] = norm
+    else:
+        print(f"DEBUG: GET failed; proceeding with webhook snapshot only")
 
-    lead_data = get_resp.json()
-    existing = lead_data.get("customFields") or lead_data.get("fields") or []
-    print(f"DEBUG: existing fields before patch: {str(existing)[:500]}")
+    if not merged_by_id and not (webhook_fields or []):
+        # No field data from anywhere — refuse to patch rather than risk wiping.
+        return "ABORTED: no existing field data available (webhook snapshot missing and GET returned nothing). Utility NOT updated to avoid wiping lead fields."
 
-    # Rebuild the full field list, updating (or adding) the Utility field (id 20)
-    merged = []
-    utility_found = False
-    for f in existing:
-        if not isinstance(f, dict):
-            continue
-        fid = f.get("id")
-        values = f.get("values") or []
-        if str(fid) == "20":
-            merged.append({"id": 20, "values": [utility_value]})
-            utility_found = True
-        else:
-            merged.append({"id": fid, "values": values})
-    if not utility_found:
-        merged.append({"id": 20, "values": [utility_value]})
+    # Set/overwrite the Utility field (id 20)
+    merged_by_id["20"] = {"id": 20, "values": [utility_value]}
+
+    merged = list(merged_by_id.values())
+    print(f"DEBUG: final merged field list for patch: {str(merged)[:500]}")
 
     resp = requests.patch(
         f"{SPOTIO_BASE}/api/leads/{lead_id}",
@@ -130,7 +176,7 @@ def update_lead_utility(lead_id, utility_value):
         },
         json={"customFields": merged}
     )
-    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}' ({len(merged)} fields preserved): {resp.status_code} {resp.text[:300]}")
+    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}' ({len(merged)} fields sent): {resp.status_code} {resp.text[:300]}")
     return f"Status: {resp.status_code}\nBody: {resp.text[:300]}"
 
 
@@ -334,6 +380,13 @@ async def process_lead(payload):
     field_map = {f.get("title", ""): (f.get("values") or [""])[0] for f in fields}
     first_name = field_map.get("First Name", "")
     last_name = field_map.get("Last Name", "")
+
+    # Snapshot of the lead's full field list from the webhook, in the exact
+    # {"id": ..., "values": [...]} shape the PATCH endpoint expects. This is the
+    # ONLY place First Name (100002) / Last Name (100003) are available — the
+    # GET /api/leads endpoint does not return them. Passed into
+    # update_lead_utility so names survive the customFields replacement.
+    webhook_field_snapshot = fields
 
     address = data_object.get("address", {}).get("fullAddress", "")
     notes = data.get("notes", "")
@@ -607,7 +660,14 @@ Recordings processed:
                 result = transcribe_audio(tool_use.input["url"])
                 result_limit = None
             elif tool_use.name == "update_lead_utility":
-                result = update_lead_utility(tool_use.input["lead_id"], tool_use.input["utility_value"])
+                # webhook_field_snapshot is injected server-side (not passed by the
+                # model) — it carries the First/Last Name fields that the GET
+                # endpoint never returns, so they survive the customFields patch.
+                result = update_lead_utility(
+                    tool_use.input["lead_id"],
+                    tool_use.input["utility_value"],
+                    webhook_fields=webhook_field_snapshot
+                )
                 result_limit = 1000
             elif tool_use.name == "ask_grok":
                 result = ask_grok(tool_use.input["question"])
