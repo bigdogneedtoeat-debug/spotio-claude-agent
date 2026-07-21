@@ -765,6 +765,28 @@ Recordings processed:
     return {"status": "done"}
 
 
+@app.get("/lead-fields")
+async def lead_fields(lead_id: str = ""):
+    """
+    TEMPORARY diagnostic: shows exactly what the Spotio API returns for a lead's
+    fields right now. Usage: /lead-fields?lead_id=<LEAD_ID>
+    Use this to compare the API's view against what the Spotio UI shows.
+    """
+    if not lead_id:
+        return {"error": "required: lead_id"}
+    token = get_spotio_token()
+    r = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers={"Authorization": f"Bearer {token}"})
+    if r.status_code != 200:
+        return {"error": f"GET returned {r.status_code}", "body": r.text[:500]}
+    body = r.json()
+    return {
+        "lead_id": body.get("id"),
+        "updatedAt": body.get("updatedAt"),
+        "fields": body.get("fields"),
+        "address": (body.get("pin") or {}).get("address"),
+    }
+
+
 @app.get("/schema-test")
 async def schema_test(lead_id: str = "", value: str = "", confirm: str = ""):
     """
