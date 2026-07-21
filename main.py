@@ -765,6 +765,99 @@ Recordings processed:
     return {"status": "done"}
 
 
+@app.get("/schema-test")
+async def schema_test(lead_id: str = "", value: str = "", confirm: str = ""):
+    """
+    TEMPORARY diagnostic endpoint to discover Spotio's real lead-field patch schema.
+
+    Usage (browser): /schema-test?lead_id=<LEAD_ID>&value=<NEW_UTILITY>&confirm=yes
+
+    Setup before running:
+      1. Pick a TEST lead. Restore its name in the Spotio UI.
+      2. Set its Utility in the UI to something DIFFERENT from <value>
+         (so a successful write is distinguishable from a no-op).
+      3. Hit this endpoint, then CHECK THE LEAD'S NAME IN THE UI.
+
+    It tries candidate patch bodies in order (least risky first), verifies each
+    via GET, and stops at the first one that (a) returns 200, (b) actually set
+    field 20 to <value>, and (c) dropped no visible fields. The customFields
+    {"id","values"} format is deliberately NOT tried — it is the known
+    name-wiping format.
+    """
+    if not lead_id or not value or confirm != "yes":
+        return {"error": "required: lead_id, value, confirm=yes"}
+
+    token = get_spotio_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    patch_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/merge-patch+json",
+        "Accept": "text/plain"
+    }
+
+    def get_fields():
+        r = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
+        if r.status_code != 200:
+            return None
+        return {str(f.get("fieldId")): f.get("value") for f in (r.json().get("fields") or [])}
+
+    pre = get_fields()
+    if pre is None:
+        return {"error": "could not GET the lead"}
+    if pre.get("20") == value:
+        return {"error": f"field 20 is ALREADY '{value}' — set it to something different in the UI first, otherwise success can't be distinguished from a no-op"}
+
+    # Build the base field set (visible fields with utility swapped in)
+    base_native_str = [{"fieldId": fid, "value": (value if fid == "20" else v)} for fid, v in pre.items()]
+    if "20" not in pre:
+        base_native_str.append({"fieldId": "20", "value": value})
+    base_native_int = [{"fieldId": int(f["fieldId"]), "value": f["value"]} for f in base_native_str]
+    base_values_shape = [{"fieldId": f["fieldId"], "values": [f["value"]]} for f in base_native_str]
+
+    candidates = [
+        ("fields key, string fieldId, value (no name fields)", {"fields": base_native_str}),
+        ("fields key, integer fieldId, value (no name fields)", {"fields": base_native_int}),
+        ("fields key, string fieldId, values-list (no name fields)", {"fields": base_values_shape}),
+        ("customFields key, fieldId/value native shape (no name fields)", {"customFields": base_native_str}),
+        ("fields key, ONLY the utility entry", {"fields": [{"fieldId": "20", "value": value}]}),
+    ]
+
+    results = []
+    winner = None
+    for label, body in candidates:
+        resp = requests.patch(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=patch_headers, json=body)
+        print(f"DEBUG: schema-test '{label}': {resp.status_code} {resp.text[:200]}")
+        entry = {"candidate": label, "status": resp.status_code, "body_sent": body}
+
+        if resp.status_code == 200:
+            post = get_fields() or {}
+            entry["utility_after"] = post.get("20")
+            entry["fields_dropped"] = sorted(set(pre.keys()) - set(post.keys()))
+            if post.get("20") == value and not entry["fields_dropped"]:
+                entry["verdict"] = "SUCCESS — utility updated, no visible fields dropped"
+                winner = label
+                results.append(entry)
+                break
+            elif entry["fields_dropped"]:
+                entry["verdict"] = "DANGEROUS — 200 but dropped fields; stopping test"
+                results.append(entry)
+                break
+            else:
+                entry["verdict"] = "no-op (200 but utility unchanged)"
+        else:
+            entry["verdict"] = "rejected — no changes made (safe)"
+        results.append(entry)
+
+    return {
+        "winner": winner,
+        "next_step": ("CHECK THE LEAD'S NAME IN THE SPOTIO UI NOW. If it survived, tell Claude the "
+                      "winning candidate and the pipeline will be switched to that format."
+                      if winner else
+                      "No candidate worked. Send these results to Claude."),
+        "results": results
+    }
+
+
 @app.get("/")
 async def health_check():
     return {"status": "alive"}
