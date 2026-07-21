@@ -121,26 +121,29 @@ def update_lead_utility(lead_id, utility_value, webhook_fields=None):
     the customer's name.
 
     HISTORY OF THIS BUG (do not simplify this function without reading):
-    1. Spotio's merge-patch REPLACES the entire customFields collection, so the
-       patch must include EVERY field, not just Utility.
-    2. GET /api/leads/{id} returns fields in a DIFFERENT shape than the PATCH
-       expects ({"fieldId": "9", "value": "..."} vs {"id": 9, "values": [...]}),
-       and does NOT return First Name (100002) / Last Name (100003) at all.
-    3. Even when 100002/100003 ARE included in the customFields patch (verified
-       in logs: 7 fields sent, 200 returned), Spotio STILL clears the lead's
-       name. The name is NOT really a custom field server-side — it lives in
-       the top-level `contactNames` property, which Spotio wipes whenever the
-       customFields collection is patched.
+    1. The lead's display name lives in hidden system fields 100002 (First Name)
+       and 100003 (Last Name). The webhook exposes them; GET /api/leads/{id}
+       does NOT return them anywhere in its body (verified via full-body dump —
+       no name property exists in the GET response; `contactNames`/`contacts`
+       are unrelated linked-contact lists, always empty for these leads).
+    2. Patching the key `customFields` (in {"id", "values"} shape) returns 200
+       and REPLACES the whole field collection, silently DROPPING the system
+       name fields even when they are included in the patch. Every customFields
+       patch therefore wipes the lead's name. Verified twice in logs.
+    3. The GET returns the field list under the key `fields` in
+       {"fieldId": "9", "value": "..."} shape. This function patches using that
+       native schema instead — key `fields`, fieldId/value entries, complete
+       set including the name fields — on the theory that the write schema
+       mirrors the read schema.
 
-    STRATEGY (self-healing):
-    a) GET the lead, snapshot `contactNames` (and log the full body so we can
-       see exactly how Spotio stores the name).
-    b) Build the full merged field list (webhook snapshot + normalized GET
-       fields + updated Utility) and send it WITH the contactNames snapshot
-       echoed back in the same merge-patch.
-    c) GET the lead again and VERIFY the name survived. If contactNames was
-       non-empty before and is empty after, immediately re-patch just
-       {"contactNames": <snapshot>} to restore it.
+    SAFETY: after patching, the function re-GETs the lead and verifies that
+    (a) field 20 holds the intended utility value and (b) every field visible
+    before the patch is still present after. If the fields-shape patch was
+    ignored (utility not set), it reports that loudly and does NOT fall back
+    to the name-wiping customFields method — a missing utility value is
+    recoverable by a rep; a wiped customer name is worse.
+    NOTE: the name itself cannot be verified via the API (GET hides it), so
+    confirm it in the Spotio UI after the first run of this version.
     """
     token = get_spotio_token()
     headers = {"Authorization": f"Bearer {token}"}
@@ -150,78 +153,84 @@ def update_lead_utility(lead_id, utility_value, webhook_fields=None):
         "Accept": "text/plain"
     }
 
-    # --- (a) Pre-patch snapshot ---
+    def to_native(f):
+        """Convert any field entry to the GET's native {"fieldId","value"} shape."""
+        norm = normalize_field_entry(f)
+        if not norm:
+            return None
+        vals = norm["values"]
+        return {"fieldId": str(norm["id"]), "value": vals[0] if vals else ""}
+
+    # --- Build the complete field set in native shape ---
+    # Start with the webhook snapshot (the ONLY source that has the name fields)
+    native_by_id = {}
+    for f in (webhook_fields or []):
+        n = to_native(f)
+        if n:
+            native_by_id[n["fieldId"]] = n
+
+    # Overlay fresher values from a live GET (already in native shape)
     get_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
     print(f"DEBUG: GET /api/leads/{lead_id}: {get_resp.status_code}")
-    pre_lead = {}
-    pre_contact_names = None
+    pre_field_ids = set()
     if get_resp.status_code == 200:
         pre_lead = get_resp.json()
-        # Log the FULL body once — this is how we learn where the name actually lives.
-        print(f"DEBUG: FULL lead body before patch: {str(pre_lead)[:3000]}")
-        pre_contact_names = pre_lead.get("contactNames")
-        print(f"DEBUG: contactNames before patch: {pre_contact_names}")
+        print(f"DEBUG: FULL lead body before patch: {str(pre_lead)[:2000]}")
+        for f in (pre_lead.get("fields") or []):
+            n = to_native(f)
+            if n:
+                native_by_id[n["fieldId"]] = n
+                pre_field_ids.add(n["fieldId"])
     else:
         print(f"DEBUG: GET failed; proceeding with webhook snapshot only")
 
-    # --- (b) Build the merged field list ---
-    merged_by_id = {}
-    for f in (webhook_fields or []):
-        norm = normalize_field_entry(f)
-        if norm:
-            merged_by_id[str(norm["id"])] = norm
+    if not native_by_id:
+        return ("ABORTED: no existing field data available (webhook snapshot missing and GET "
+                "returned nothing). Utility NOT updated to avoid wiping lead fields.")
 
-    existing = pre_lead.get("customFields") or pre_lead.get("fields") or []
-    for f in existing:
-        norm = normalize_field_entry(f)
-        if norm:
-            merged_by_id[str(norm["id"])] = norm
+    # Set the Utility field (id 20)
+    native_by_id["20"] = {"fieldId": "20", "value": utility_value}
 
-    if not merged_by_id:
-        return "ABORTED: no existing field data available (webhook snapshot missing and GET returned nothing). Utility NOT updated to avoid wiping lead fields."
+    field_list = list(native_by_id.values())
+    print(f"DEBUG: native-shape field list for patch: {str(field_list)[:600]}")
 
-    merged_by_id["20"] = {"id": 20, "values": [utility_value]}
-    merged = list(merged_by_id.values())
-    print(f"DEBUG: final merged field list for patch: {str(merged)[:500]}")
+    resp = requests.patch(
+        f"{SPOTIO_BASE}/api/leads/{lead_id}",
+        headers=patch_headers,
+        json={"fields": field_list}
+    )
+    print(f"DEBUG: PATCH lead utility (fields-key, native shape) {lead_id} -> '{utility_value}' "
+          f"({len(field_list)} fields sent): {resp.status_code} {resp.text[:300]}")
 
-    patch_body = {"customFields": merged}
-    # Echo the current name back in the same patch so merge-patch preserves it.
-    if pre_contact_names:
-        patch_body["contactNames"] = pre_contact_names
-
-    resp = requests.patch(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=patch_headers, json=patch_body)
-    print(f"DEBUG: PATCH lead utility {lead_id} -> '{utility_value}' ({len(merged)} fields sent, contactNames echoed: {bool(pre_contact_names)}): {resp.status_code} {resp.text[:300]}")
-
-    # --- (c) Verify and restore the name if Spotio cleared it anyway ---
-    name_status = "name not verified (no pre-patch name snapshot to compare)"
+    # --- Verify: did the patch actually take, and did anything get dropped? ---
+    verify_notes = []
     verify_resp = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
     if verify_resp.status_code == 200:
         post_lead = verify_resp.json()
-        post_contact_names = post_lead.get("contactNames")
-        print(f"DEBUG: contactNames after patch: {post_contact_names}")
+        post_fields = {str(f.get("fieldId")): f.get("value") for f in (post_lead.get("fields") or [])}
+        print(f"DEBUG: fields after patch: {post_fields}")
 
-        if pre_contact_names and not post_contact_names:
-            print(f"DEBUG: NAME WIPED by patch — restoring contactNames: {pre_contact_names}")
-            restore_resp = requests.patch(
-                f"{SPOTIO_BASE}/api/leads/{lead_id}",
-                headers=patch_headers,
-                json={"contactNames": pre_contact_names}
+        if post_fields.get("20") == utility_value:
+            verify_notes.append(f"utility verified set to '{utility_value}'")
+        else:
+            verify_notes.append(
+                f"WARNING: utility NOT updated (field 20 is '{post_fields.get('20')}', expected "
+                f"'{utility_value}') — the fields-key patch appears to have been ignored by Spotio. "
+                f"Do NOT retry with other methods; report this so the patch schema can be revisited."
             )
-            print(f"DEBUG: contactNames restore patch: {restore_resp.status_code} {restore_resp.text[:300]}")
-            # Verify the restore took
-            reverify = requests.get(f"{SPOTIO_BASE}/api/leads/{lead_id}", headers=headers)
-            if reverify.status_code == 200 and reverify.json().get("contactNames"):
-                name_status = "name was wiped by the patch but was successfully restored"
-            else:
-                name_status = ("WARNING: name was wiped by the patch and the automatic restore "
-                               "did NOT stick — the lead name needs manual attention in Spotio")
-        elif pre_contact_names and post_contact_names:
-            name_status = "name verified intact after patch"
-        elif not pre_contact_names:
-            name_status = ("NOTE: this lead had no contactNames BEFORE the patch (name was already "
-                           "missing) — check the FULL lead body debug line to see where the name is stored")
 
-    return f"Status: {resp.status_code}\nBody: {resp.text[:300]}\nName check: {name_status}"
+        dropped = pre_field_ids - set(post_fields.keys())
+        if dropped:
+            verify_notes.append(f"WARNING: fields dropped by patch: {sorted(dropped)} — needs attention")
+        elif pre_field_ids:
+            verify_notes.append("all previously visible fields still present")
+    else:
+        verify_notes.append(f"could not verify (post-patch GET returned {verify_resp.status_code})")
+
+    verify_notes.append("customer name cannot be verified via API — check the lead in the Spotio UI")
+    verdict = "; ".join(verify_notes)
+    print(f"DEBUG: post-patch verification: {verdict}")
+    return f"Status: {resp.status_code}\nBody: {resp.text[:300]}\nVerification: {verdict}"
 
 
 def update_spotio_field(record_type, record_id, fields):
