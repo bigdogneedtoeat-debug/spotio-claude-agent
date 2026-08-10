@@ -37,15 +37,32 @@ def get_spotio_token():
 
 
 def transcribe_audio(url):
+    # model=nova-3: current general model (the parameterless default is an older model).
+    # smart_format: formats times/numbers as digits ("11:30 AM" instead of "eleven thirty")
+    #   and adds punctuation — critical for parsing scheduling negotiations.
+    # diarize + utterances: speaker-labeled turns, so the model can tell whether the
+    #   customer or the rep said a given time.
     response = requests.post(
-        "https://api.deepgram.com/v1/listen",
+        "https://api.deepgram.com/v1/listen"
+        "?model=nova-3&smart_format=true&punctuate=true&diarize=true&utterances=true",
         headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
         json={"url": url}
     )
     data = response.json()
     try:
-        return data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        utterances = data.get("results", {}).get("utterances")
+        if utterances:
+            transcript = "\n".join(
+                f"[Speaker {u.get('speaker', '?')}] {u.get('transcript', '')}"
+                for u in utterances
+            )
+        else:
+            transcript = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        # Log the full transcript so appointment/address disputes are auditable later.
+        print(f"DEBUG: transcript for {url} ({len(transcript)} chars):\n{transcript}")
+        return transcript
     except Exception:
+        print(f"DEBUG: transcription FAILED for {url}: {str(data)[:2000]}")
         return f"Transcription failed: {data}"
 
 
@@ -487,7 +504,17 @@ async def process_lead(payload):
         print(f"DEBUG: Could not fetch activity {activity_id} after delay: {refreshed.status_code}")
         return {"status": f"error fetching activity after delay: {refreshed.status_code}"}
 
-    refreshed_notes = refreshed.json().get("notes", "")
+    refreshed_body = refreshed.json()
+    refreshed_notes = refreshed_body.get("notes", "")
+
+    # Use the CURRENT appointment date from the re-fetch, not the webhook snapshot.
+    # A rep may have edited the time during the 5-minute delay; comparing the call
+    # against a stale value would produce a false mismatch (or mask a real one).
+    refreshed_date = refreshed_body.get("date", "")
+    if refreshed_date:
+        if refreshed_date != appointment_date:
+            print(f"DEBUG: appointment date changed during delay: webhook={appointment_date} -> refreshed={refreshed_date}")
+        appointment_date = refreshed_date
 
     import re
     def extract_links(text):
@@ -544,8 +571,19 @@ Your job (LIMITED SCOPE — this is a follow-up call check, not a full workup):
    - Compare against the appointment date/time and address on file above.
    - CRITICAL TIMEZONE RULE: Spotio stores all dates in UTC. All appointments are Eastern
      Time (ET). During EDT (Mar-Nov): ET = UTC-4. During EST (Nov-Mar): ET = UTC-5. ALWAYS
-     convert the time said on the call (Eastern) to UTC before comparing. Example: call says
-     "10 AM", Spotio shows 14:00 UTC — these MATCH. Do NOT correct.
+     convert the time said on the call (Eastern) to UTC before comparing.
+     MATCH example: call says "10 AM", Spotio shows 14:00 UTC (EDT) — these MATCH (both
+     10 AM ET). Do NOT correct.
+     MISMATCH example: call agrees on "11:30 AM", Spotio shows 16:00 UTC (EDT) = 12:00 PM
+     ET — these DIFFER by 30 minutes. CORRECT Spotio to 15:30:00 UTC. Half-hour and
+     quarter-hour differences are real mistakes, not rounding — never treat a 15- or
+     30-minute discrepancy as "close enough".
+   - GROUNDING REQUIREMENT: before declaring the appointment time a match OR a mismatch,
+     quote verbatim (in your reasoning) the exact sentence(s) from the transcript where the
+     time is agreed, and identify the FINAL agreed time. If the call is a negotiation
+     ("could we do X instead of Y?"), the final agreed time is what counts, not the first
+     time mentioned. If no sentence in the transcript states the time, say so explicitly —
+     do not claim the recording "confirmed" the on-file value.
    - CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of the
      week a date falls on. If the call mentions a day name (e.g. "this Friday"), use
      web_search to confirm the exact calendar date, using the activity created date
@@ -600,9 +638,22 @@ Your job:
      territory are Eastern Time (ET). During EDT (Mar-Nov): ET = UTC-4, so 10:00 AM ET =
      14:00 UTC. During EST (Nov-Mar): ET = UTC-5, so 10:00 AM ET = 15:00 UTC. ALWAYS
      convert what the customer/rep says on the call (Eastern) to UTC before comparing to
-     the Spotio value. Example: call says "10 AM", Spotio shows 14:00 UTC — these MATCH
-     (both are 10 AM ET). Do NOT correct this. Only correct if the Eastern times genuinely
-     differ after converting both to the same timezone.
+     the Spotio value. Only correct if the Eastern times genuinely differ after converting
+     both to the same timezone.
+     MATCH example: call says "10 AM", Spotio shows 14:00 UTC (EDT) — these MATCH (both
+     are 10 AM ET). Do NOT correct this.
+     MISMATCH example: call agrees on "11:30 AM", Spotio shows 16:00 UTC (EDT) = 12:00 PM
+     ET — these DIFFER by 30 minutes. CORRECT Spotio to 15:30:00 UTC. Half-hour and
+     quarter-hour differences are real mistakes, not rounding — never treat a 15- or
+     30-minute discrepancy as "close enough".
+
+     GROUNDING REQUIREMENT: before declaring the appointment time a match OR a mismatch,
+     quote verbatim (in your reasoning) the exact sentence(s) from the transcript where
+     the time is agreed, and identify the FINAL agreed time. If multiple times are
+     discussed ("could we do eleven thirty instead of twelve?"), the final agreed time is
+     what counts, not the first time mentioned. If more than one recording exists, the
+     latest call wins. If no sentence in the transcript states a time, say so explicitly
+     in the notes — do not claim the recording "confirmed" the on-file value.
 
      CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of
      the week a specific date falls on — this is error-prone. If the call mentions a day
@@ -654,7 +705,7 @@ Your job:
 7. WRITE A CLEAN, STRUCTURED SUMMARY using EXACTLY this format and structure:
 
 Corrections made:
-- [One short sentence: either "No corrections were necessary." followed by one sentence confirming address and appointment were verified, OR describe what was changed in plain language.]
+- [One short sentence: either "No corrections were necessary." followed by one sentence stating the exact appointment date/time you heard agreed on the call (plain language) and confirming it matches what's on file, OR describe what was changed in plain language. If the call never states a time, write "Appointment time not stated on the call — could not verify." instead of claiming it was confirmed.]
 
 Call details:
 - Solar mentioned: [Yes/No and count, very brief]
