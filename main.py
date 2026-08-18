@@ -468,7 +468,34 @@ async def process_lead(payload):
 
     # Use the webhook event's actual fired timestamp as the creation date reference,
     # NOT data.get("date") which is the appointment date, not when the activity was created.
-    activity_created_date = events[0].get("date", data.get("date", ""))[:10]
+    #
+    # CRITICAL: convert to Eastern time BEFORE taking the calendar date. The webhook
+    # timestamp is UTC; any call made after 8 PM EDT / 7 PM EST lands on the NEXT UTC
+    # day. Using the UTC date as the reference for resolving day names ("Monday at
+    # 5 PM") shifts the whole calendar by one day for evening calls. Day-of-week is
+    # also computed here in Python — the model must never assign day names itself.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+
+    def to_eastern(iso_str):
+        """Parse an ISO-8601 UTC timestamp and return it in Eastern time, or None."""
+        if not iso_str:
+            return None
+        try:
+            return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(ET)
+        except (ValueError, TypeError):
+            return None
+
+    raw_event_date = events[0].get("date", data.get("date", ""))
+    created_et = to_eastern(raw_event_date)
+    if created_et:
+        activity_created_date = created_et.strftime("%Y-%m-%d")
+        activity_created_day = created_et.strftime("%A")
+    else:
+        activity_created_date = raw_event_date[:10]
+        activity_created_day = "UNKNOWN — verify via web_search"
 
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
         print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
@@ -516,6 +543,16 @@ async def process_lead(payload):
             print(f"DEBUG: appointment date changed during delay: webhook={appointment_date} -> refreshed={refreshed_date}")
         appointment_date = refreshed_date
 
+    # Server-computed Eastern rendering of the on-file appointment, including
+    # day-of-week. This is injected into the prompt as an authoritative fact so
+    # the model never does UTC->ET conversion or calendar math itself.
+    appt_et = to_eastern(appointment_date)
+    if appt_et:
+        appointment_local = appt_et.strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " ") + " Eastern"
+    else:
+        appointment_local = "could not parse — convert from UTC yourself and verify day-of-week via web_search"
+    print(f"DEBUG: appointment on file: {appointment_date} = {appointment_local}; activity created {activity_created_date} ({activity_created_day} ET)")
+
     import re
     def extract_links(text):
         return set(re.findall(r'https?://[^\s\'"<>)]+', text))
@@ -555,8 +592,8 @@ async def process_lead(payload):
 
 Customer Name: {first_name} {last_name}
 Address on file: {address}
-Appointment date/time on file: {appointment_date}
-Activity created date: {activity_created_date}
+Appointment date/time on file: {appointment_date} — in local terms this is {appointment_local}. This conversion (including the day of the week) was computed programmatically and is authoritative; do NOT re-derive it.
+Activity created date: {activity_created_date} ({activity_created_day}, Eastern Time) — this is when the webhook fired, already converted to Eastern. The day of the week was computed programmatically and is authoritative.
 Current activity notes (contains the previous AI summary): {notes}
 NEW recording link(s) to process: {', '.join(new_links)}
 Activity ID: {activity_id}
@@ -585,9 +622,19 @@ Your job (LIMITED SCOPE — this is a follow-up call check, not a full workup):
      time mentioned. If no sentence in the transcript states the time, say so explicitly —
      do not claim the recording "confirmed" the on-file value.
    - CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of the
-     week a date falls on. If the call mentions a day name (e.g. "this Friday"), use
-     web_search to confirm the exact calendar date, using the activity created date
-     ({activity_created_date}) as reference.
+     week a date falls on. The day-of-week facts provided above (for the created date and the
+     on-file appointment) are computed programmatically and are AUTHORITATIVE — trust them
+     over any assumption or search result. If the call mentions a day name (e.g. "this
+     Friday"), use web_search to confirm which calendar date it maps to, counting forward
+     from the created date {activity_created_date} ({activity_created_day}).
+     NOTE: the created date is when the recording was uploaded, which can be a day AFTER
+     the call itself — do not assume the call happened on the created date, and never infer
+     a date's day-of-week from what day you believe the call took place.
+   - DAY-NAME SANITY CHECK (required before ANY date change): the on-file appointment's
+     day-of-week is stated above. If the day name agreed on the call (e.g. "Monday at
+     5 PM") MATCHES the on-file appointment's day-of-week, the appointment is CORRECT —
+     do NOT move it. Only change the date if the agreed day name genuinely differs from
+     the on-file day-of-week, and state both in your reasoning.
    - If the appointment genuinely changed, update it with update_spotio_field
      (record_type="activity", record_id={activity_id}, fields={{"date": "..."}}).
    - If the address genuinely changed, update it with update_spotio_field
@@ -610,8 +657,8 @@ Your job (LIMITED SCOPE — this is a follow-up call check, not a full workup):
 
 Customer Name: {first_name} {last_name}
 Address on file: {address}
-Appointment date/time on file: {appointment_date}
-Activity created date: {activity_created_date}
+Appointment date/time on file: {appointment_date} — in local terms this is {appointment_local}. This conversion (including the day of the week) was computed programmatically and is authoritative; do NOT re-derive it.
+Activity created date: {activity_created_date} ({activity_created_day}, Eastern Time) — this is when the webhook fired, already converted to Eastern. The day of the week was computed programmatically and is authoritative.
 Activity notes (may contain a link): {notes}
 Activity ID: {activity_id}
 Related Lead ID: {lead_id}
@@ -656,12 +703,24 @@ Your job:
      in the notes — do not claim the recording "confirmed" the on-file value.
 
      CRITICAL DAY-OF-WEEK RULE: Never rely on your own mental calculation of what day of
-     the week a specific date falls on — this is error-prone. If the call mentions a day
-     name (e.g. "this Friday", "next Monday"), you MUST use web_search to confirm exactly
-     which calendar date that corresponds to, using the activity created date ({activity_created_date})
-     as your reference point for what "this week" means. Only after confirming the exact
-     date via web search should you compare it to the Spotio value and decide if a
-     correction is needed.
+     the week a specific date falls on — this is error-prone. The day-of-week facts
+     provided above (for the created date and the on-file appointment) are computed
+     programmatically and are AUTHORITATIVE — trust them over any assumption or search
+     result. If the call mentions a day name (e.g. "this Friday", "next Monday"), you MUST
+     use web_search to confirm exactly which calendar date that corresponds to, counting
+     forward from the created date {activity_created_date} ({activity_created_day}). Only
+     after confirming the exact date should you compare it to the Spotio value and decide
+     if a correction is needed.
+     NOTE: the created date is when the recording was uploaded, which can be a day AFTER
+     the call itself — do not assume the call happened on the created date, and never
+     infer a date's day-of-week from what day you believe the call took place.
+
+     DAY-NAME SANITY CHECK (required before ANY date change): the on-file appointment's
+     day-of-week is stated above. If the day name agreed on the call (e.g. "Monday at
+     5 PM") MATCHES the on-file appointment's day-of-week, the appointment is CORRECT —
+     do NOT move it. Only change the date if the agreed day name genuinely differs from
+     the on-file day-of-week, and your correction note must state both the old and new
+     dates WITH their day names.
 
    - Only make a correction if you're confident it's a real mistake. If you make any
      correction, note exactly what was changed in the notes in plain human-readable format
