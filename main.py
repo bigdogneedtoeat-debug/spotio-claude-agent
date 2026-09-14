@@ -501,15 +501,23 @@ async def process_lead(payload):
         print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
         return {"status": "skipped (not in test allowlist)"}
 
-    ALLOWED_SOURCES = ["growthify", "treasured leads"]
-    if source.strip().lower() not in ALLOWED_SOURCES:
+    ALLOWED_SOURCES = ["growthify", "treasured leads", "lightskye"]
+    source_key = source.strip().lower()
+    if source_key not in ALLOWED_SOURCES:
         print(f"DEBUG: SKIPPING — lead source is '{source}', not in allowed sources. activity_id={activity_id}")
         return {"status": f"skipped (source is '{source}', not in allowed sources)"}
 
-    ALLOWED_ASSIGNED_EMAILS = ["info@growthifylabs.com"]
-    if source.strip().lower() == "growthify" and assigned_email.strip().lower() not in ALLOWED_ASSIGNED_EMAILS:
-        print(f"DEBUG: SKIPPING — Growthify lead not assigned to Growthify email. activity_id={activity_id}")
-        return {"status": f"skipped (Growthify lead not assigned to Growthify, assigned to '{assigned_email}')"}
+    # Sources that must be assigned to a specific Spotio user to be processed.
+    # Keyed by lowercased source name -> list of allowed assignedUserEmail values.
+    # Sources not listed here (e.g. Treasured Leads) have no assignee restriction.
+    SOURCE_ASSIGNEE_GATE = {
+        "growthify": ["info@growthifylabs.com"],
+        "lightskye": ["zyiadhaiba@lightskye.com"],
+    }
+    allowed_assignees = SOURCE_ASSIGNEE_GATE.get(source_key)
+    if allowed_assignees and assigned_email.strip().lower() not in [e.lower() for e in allowed_assignees]:
+        print(f"DEBUG: SKIPPING — {source} lead not assigned to an allowed {source} user. activity_id={activity_id}")
+        return {"status": f"skipped ({source} lead not assigned to allowed user, assigned to '{assigned_email}')"}
 
     # Skip leads created before the cutoff date — avoids processing stale/old leads
     # whose activities get touched by rep edits or bulk updates.
