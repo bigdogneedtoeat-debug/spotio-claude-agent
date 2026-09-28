@@ -465,6 +465,14 @@ async def process_lead(payload):
     appointment_date = data.get("date", "")
     source = field_map.get("Source", "")
     assigned_email = data_object.get("assignedUserEmail", "")
+    event_type = events[0].get("type", "") if events else ""
+    activity_owner = (data.get("owner") or {}).get("userEmail", "")
+
+    # One trace line per webhook, BEFORE any gate runs, carrying every field the
+    # gates look at. If an activity never shows up here, Spotio never sent it.
+    print(f"DEBUG: webhook {event_type} activity_id={activity_id} customer='{first_name} {last_name}' "
+          f"source='{source}' lead_assigned='{assigned_email}' activity_owner='{activity_owner}' "
+          f"lead_id={lead_id} appt={appointment_date}")
 
     # Use the webhook event's actual fired timestamp as the creation date reference,
     # NOT data.get("date") which is the appointment date, not when the activity was created.
@@ -498,13 +506,13 @@ async def process_lead(payload):
         activity_created_day = "UNKNOWN — verify via web_search"
 
     if ALLOWED_TEST_IDS and activity_id not in ALLOWED_TEST_IDS and lead_id not in ALLOWED_TEST_IDS:
-        print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id}")
+        print(f"DEBUG: SKIPPING — not in test allowlist. activity_id={activity_id} ({first_name} {last_name})")
         return {"status": "skipped (not in test allowlist)"}
 
     ALLOWED_SOURCES = ["growthify", "treasured leads", "lightskye"]
     source_key = source.strip().lower()
     if source_key not in ALLOWED_SOURCES:
-        print(f"DEBUG: SKIPPING — lead source is '{source}', not in allowed sources. activity_id={activity_id}")
+        print(f"DEBUG: SKIPPING — lead source is '{source}', not in allowed sources. activity_id={activity_id} ({first_name} {last_name})")
         return {"status": f"skipped (source is '{source}', not in allowed sources)"}
 
     # Sources that must be assigned to a specific Spotio user to be processed.
@@ -516,7 +524,8 @@ async def process_lead(payload):
     }
     allowed_assignees = SOURCE_ASSIGNEE_GATE.get(source_key)
     if allowed_assignees and assigned_email.strip().lower() not in [e.lower() for e in allowed_assignees]:
-        print(f"DEBUG: SKIPPING — {source} lead not assigned to an allowed {source} user. activity_id={activity_id}")
+        print(f"DEBUG: SKIPPING — {source} lead for '{first_name} {last_name}' assigned to '{assigned_email}', "
+              f"not an allowed {source} user (allowed: {allowed_assignees}). activity_id={activity_id}")
         return {"status": f"skipped ({source} lead not assigned to allowed user, assigned to '{assigned_email}')"}
 
     # Skip leads created before the cutoff date — avoids processing stale/old leads
@@ -524,10 +533,10 @@ async def process_lead(payload):
     LEAD_CUTOFF_DATE = "2026-07-01"
     lead_created_at = data_object.get("createdAt", "")[:10]
     if lead_created_at and lead_created_at < LEAD_CUTOFF_DATE:
-        print(f"DEBUG: SKIPPING — lead created {lead_created_at}, before cutoff {LEAD_CUTOFF_DATE}. activity_id={activity_id}")
+        print(f"DEBUG: SKIPPING — lead created {lead_created_at}, before cutoff {LEAD_CUTOFF_DATE}. activity_id={activity_id} ({first_name} {last_name})")
         return {"status": f"skipped (lead created {lead_created_at}, before cutoff)"}
 
-    print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id}...")
+    print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id} ({first_name} {last_name})...")
     await asyncio.sleep(300)
 
     token = get_spotio_token()
@@ -582,14 +591,14 @@ async def process_lead(payload):
 
         new_links = drive_links - processed_links
         if not new_links:
-            print(f"DEBUG: SKIPPING — activity {activity_id} already processed, no new recordings.")
+            print(f"DEBUG: SKIPPING — activity {activity_id} ({first_name} {last_name}) already processed, no new recordings.")
             return {"status": "skipped (already processed, no new recordings)"}
 
         is_confirmation_rerun = True
         print(f"DEBUG: RERUN — {len(new_links)} new recording(s) found on already-processed activity {activity_id}: {new_links}")
     else:
         if not drive_links and "http" not in refreshed_notes:
-            print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id}")
+            print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id} ({first_name} {last_name})")
             return {"status": "skipped (no recording link in notes)"}
 
     notes = refreshed_notes
