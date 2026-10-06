@@ -409,15 +409,89 @@ async def handle_lead(request: Request):
         print(f"DEBUG: Could not parse webhook payload: {repr(e)}")
         return {"status": "bad payload"}
 
-    asyncio.create_task(process_lead_safe(payload))
+    # Spotio can deliver SEVERAL events in one POST (e.g. the lead-created entry
+    # and the consult created by the same API call). Every event gets its own
+    # task. Reading only events[0] silently dropped the rest — that is how
+    # consults were being missed at intake.
+    events = payload.get("payload") if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        events = []
+    events = [e for e in events if isinstance(e, dict)]
+
+    # Receipt line, BEFORE any gate: how many events arrived and which ones.
+    # If an activity is missing from these lines, Spotio never sent it.
+    summary = ", ".join(
+        f"{e.get('type', '?')}:{(e.get('data') or {}).get('id', '?')}"
+        for e in events
+    )
+    print(f"DEBUG: webhook POST received with {len(events)} event(s): [{summary}]")
+
+    for event in events:
+        # Same payload shape as before, but carrying exactly one event, so the
+        # rest of the pipeline (which reads events[0]) is unchanged.
+        single = {**payload, "payload": [event]}
+        asyncio.create_task(process_lead_safe(single))
     return {"status": "accepted"}
 
 
 # Track activities currently being processed to dedupe rapid duplicate deliveries
 _in_flight_activities = set()
 
+# How many activity IDs above a no-recording entry to check for the lead's
+# consult. Observed gap between the lead-created entry and its consult on API
+# intakes is 2 to 7.
+CONSULT_PROBE_WINDOW = 30
 
-async def process_lead_safe(payload):
+
+def is_retracted(title, notes):
+    """True when LightSkye has retracted the appointment (title or notes lead with RETRACTED)."""
+    return (str(title or "").strip().upper().startswith("RETRACTED")
+            or str(notes or "").strip().upper().startswith("RETRACTED"))
+
+
+def find_sibling_consult(activity_id, lead_id):
+    """
+    Given an activity with no recording link (typically Spotio's automatic
+    lead-created entry), find the consult created alongside it for the SAME lead.
+
+    Activity IDs are sequential and the consult is created right after the
+    entry, so this checks the next CONSULT_PROBE_WINDOW IDs using the same
+    GET /api/v2/activities/{id} call the pipeline already relies on, and returns
+    the first one that belongs to this lead and is an appointment/event.
+    Returns (consult_id, consult_body) or (None, None).
+    """
+    try:
+        base_id = int(activity_id)
+    except (TypeError, ValueError):
+        return None, None
+    if not lead_id:
+        return None, None
+
+    headers = {"Authorization": f"Bearer {get_spotio_token()}"}
+    for candidate in range(base_id + 1, base_id + 1 + CONSULT_PROBE_WINDOW):
+        try:
+            r = requests.get(f"{SPOTIO_BASE}/api/v2/activities/{candidate}", headers=headers, timeout=15)
+        except Exception as e:
+            print(f"DEBUG: consult lookup GET {candidate} failed: {repr(e)}")
+            continue
+        if r.status_code != 200:
+            continue  # belongs to another account, deleted, or does not exist
+        try:
+            body = r.json()
+        except Exception:
+            continue
+        if not isinstance(body, dict):
+            continue
+        if str(body.get("dataObjectId", "")) != str(lead_id):
+            continue
+        is_event = str(body.get("type", "")).lower() == "event" or bool(body.get("appointmentId"))
+        if not is_event or body.get("isNote"):
+            continue
+        return str(candidate), body
+    return None, None
+
+
+async def process_lead_safe(payload, skip_delay=False, allow_fallback=True):
     activity_id = ""
     try:
         events = payload.get("payload", [])
@@ -431,7 +505,7 @@ async def process_lead_safe(payload):
         if activity_id:
             _in_flight_activities.add(activity_id)
 
-        await process_lead(payload)
+        await process_lead(payload, skip_delay=skip_delay, allow_fallback=allow_fallback)
     except Exception as e:
         import traceback
         print(f"DEBUG: UNHANDLED EXCEPTION: {repr(e)}")
@@ -441,7 +515,7 @@ async def process_lead_safe(payload):
             _in_flight_activities.discard(activity_id)
 
 
-async def process_lead(payload):
+async def process_lead(payload, skip_delay=False, allow_fallback=True):
     events = payload.get("payload", [])
     data = events[0].get("data", {}) if events else {}
     data_object = data.get("dataObject", {})
@@ -536,8 +610,17 @@ async def process_lead(payload):
         print(f"DEBUG: SKIPPING — lead created {lead_created_at}, before cutoff {LEAD_CUTOFF_DATE}. activity_id={activity_id} ({first_name} {last_name})")
         return {"status": f"skipped (lead created {lead_created_at}, before cutoff)"}
 
-    print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id} ({first_name} {last_name})...")
-    await asyncio.sleep(300)
+    # A retracted appointment must never be processed: the agent would overwrite
+    # LightSkye's retraction notice with a normal call summary.
+    if is_retracted(data.get("title"), notes):
+        print(f"DEBUG: SKIPPING — appointment retracted by LightSkye. activity_id={activity_id} ({first_name} {last_name})")
+        return {"status": "skipped (retracted)"}
+
+    if skip_delay:
+        print(f"DEBUG: Processing activity {activity_id} ({first_name} {last_name}) without delay (consult fallback)...")
+    else:
+        print(f"DEBUG: Waiting 5 minutes before processing activity {activity_id} ({first_name} {last_name})...")
+        await asyncio.sleep(300)
 
     token = get_spotio_token()
     refreshed = requests.get(
@@ -549,7 +632,14 @@ async def process_lead(payload):
         return {"status": f"error fetching activity after delay: {refreshed.status_code}"}
 
     refreshed_body = refreshed.json()
-    refreshed_notes = refreshed_body.get("notes", "")
+    refreshed_notes = refreshed_body.get("notes") or ""
+
+    # Re-check after the delay: the retraction may have landed during the wait,
+    # and an earlier run may have overwritten the notes while the title still
+    # says RETRACTED.
+    if is_retracted(refreshed_body.get("title"), refreshed_notes):
+        print(f"DEBUG: SKIPPING — appointment retracted by LightSkye. activity_id={activity_id} ({first_name} {last_name})")
+        return {"status": "skipped (retracted)"}
 
     # Use the CURRENT appointment date from the re-fetch, not the webhook snapshot.
     # A rep may have edited the time during the 5-minute delay; comparing the call
@@ -599,6 +689,34 @@ async def process_lead(payload):
     else:
         if not drive_links and "http" not in refreshed_notes:
             print(f"DEBUG: SKIPPING — no recording link in notes after delay. activity_id={activity_id} ({first_name} {last_name})")
+
+            # CONSULT FALLBACK. On API intakes Spotio always sends the
+            # lead-created entry but does not reliably send the consult's own
+            # event. So when the entry we were handed has no recording, go find
+            # this lead's consult and process that instead. The in-flight set
+            # and the "already processed" check stop double runs when the
+            # consult's own event did arrive.
+            if allow_fallback:
+                consult_id, consult_body = find_sibling_consult(activity_id, lead_id)
+                if not consult_id:
+                    print(f"DEBUG: consult fallback — no consult found for lead {lead_id} in the "
+                          f"{CONSULT_PROBE_WINDOW} activity IDs after {activity_id} ({first_name} {last_name})")
+                else:
+                    print(f"DEBUG: consult fallback — activity {activity_id} has no recording; "
+                          f"switching to consult {consult_id} for {first_name} {last_name}")
+                    import copy
+                    consult_payload = copy.deepcopy(payload)
+                    consult_data = consult_payload["payload"][0]["data"]
+                    consult_data["id"] = int(consult_id)
+                    consult_data["objectId"] = consult_id
+                    consult_data["title"] = consult_body.get("title", "")
+                    consult_data["notes"] = consult_body.get("notes") or ""
+                    if consult_body.get("date"):
+                        consult_data["date"] = consult_body["date"]
+                    # allow_fallback=False: never chain from one fallback into another.
+                    await process_lead_safe(consult_payload, skip_delay=True, allow_fallback=False)
+                    return {"status": f"handed off to consult {consult_id}"}
+
             return {"status": "skipped (no recording link in notes)"}
 
     notes = refreshed_notes
